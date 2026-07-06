@@ -11,13 +11,20 @@ import java.nio.file.*;
 import java.util.List;
 
 /**
- * Génère un projet JAX-RS complet à partir d'une liste d'EjbInfo.
- * Produit:
- * - POM avec dépendances Jakarta EE / JAX-RS
- * - Resources JAX-RS (@Path, @GET, @POST, @Consumes/@Produces JSON)
- * - DTOs Request/Response en JSON
- * - Service layer avec JNDI lookup
- * - Application JAX-RS config
+ * Génère un projet JAX-RS natif à partir d'une liste d'EjbInfo.
+ * <p>
+ * Effectue une <strong>transformation directe</strong> du code EJB en endpoints REST :
+ * le code métier est adapté directement dans les Resources JAX-RS, sans couche
+ * intermédiaire Service/JNDI.
+ * <p>
+ * Produit :
+ * <ul>
+ *   <li>POM avec dépendances Jakarta EE 10 / JAX-RS 3.x / JSON-B 3.x</li>
+ *   <li>Resources JAX-RS (@Path, @GET, @POST, @Consumes/@Produces JSON) contenant la logique métier</li>
+ *   <li>DTOs Request/Response en JSON</li>
+ *   <li>Application JAX-RS config</li>
+ *   <li>beans.xml pour CDI</li>
+ * </ul>
  */
 public class JaxrsProjectGenerator {
 
@@ -39,7 +46,7 @@ public class JaxrsProjectGenerator {
     public void generate(List<EjbInfo> ejbs, Path outputDir) throws IOException {
         log.info("Generating JAX-RS project in: {}", outputDir);
         log.info("  groupId={}, artifactId={}, basePackage={}", groupId, artifactId, basePackage);
-        log.info("  EJBs to wrap: {}", ejbs.size());
+        log.info("  EJBs to transform: {}", ejbs.size());
 
         Files.createDirectories(outputDir);
 
@@ -48,26 +55,23 @@ public class JaxrsProjectGenerator {
         Path srcResources = outputDir.resolve("src/main/resources");
         Path resourceDir = srcMain.resolve("resource");
         Path dtoDir = srcMain.resolve("dto");
-        Path serviceDir = srcMain.resolve("service");
         Path configDir = srcMain.resolve("config");
 
         Files.createDirectories(resourceDir);
         Files.createDirectories(dtoDir);
-        Files.createDirectories(serviceDir);
         Files.createDirectories(configDir);
         Files.createDirectories(srcResources);
 
-        // 1. POM
+        // 1. POM (sans jakarta.ejb-api — transformation directe, pas de dépendance EJB)
         generatePom(outputDir);
 
         // 2. JAX-RS Application config
         generateJaxRsApplication(configDir);
 
-        // 3. Pour chaque EJB: Resource + DTOs + Service
+        // 3. Pour chaque EJB: Resource + DTOs (pas de Service layer)
         for (EjbInfo ejb : ejbs) {
             generateResource(resourceDir, ejb);
             generateDtos(dtoDir, ejb);
-            generateService(serviceDir, ejb);
         }
 
         // 4. beans.xml pour CDI
@@ -113,14 +117,6 @@ public class JaxrsProjectGenerator {
                             <groupId>jakarta.json.bind</groupId>
                             <artifactId>jakarta.json.bind-api</artifactId>
                             <version>3.0.0</version>
-                            <scope>provided</scope>
-                        </dependency>
-                
-                        <!-- EJB Client (for JNDI lookup) -->
-                        <dependency>
-                            <groupId>jakarta.ejb</groupId>
-                            <artifactId>jakarta.ejb-api</artifactId>
-                            <version>4.0.1</version>
                             <scope>provided</scope>
                         </dependency>
                     </dependencies>
@@ -173,36 +169,33 @@ public class JaxrsProjectGenerator {
         Files.writeString(configDir.resolve("JaxRsApplication.java"), code);
     }
 
-    // ===== Resource (Controller JAX-RS) =====
+    // ===== Resource (Endpoint JAX-RS avec logique métier directe) =====
 
     private void generateResource(Path resourceDir, EjbInfo ejb) throws IOException {
         String resourceName = capitalize(ejb.deriveResourceName().replace("-", "")) + "Resource";
-        String serviceName = capitalize(ejb.deriveResourceName().replace("-", "")) + "Service";
         String path = "/" + ejb.deriveResourceName();
 
         StringBuilder sb = new StringBuilder();
         sb.append("package ").append(basePackage).append(".resource;\n\n");
 
         // Imports
-        sb.append("import jakarta.inject.Inject;\n");
+        sb.append("import jakarta.enterprise.context.ApplicationScoped;\n");
         sb.append("import jakarta.ws.rs.*;\n");
         sb.append("import jakarta.ws.rs.core.MediaType;\n");
         sb.append("import jakarta.ws.rs.core.Response;\n");
-        sb.append("import ").append(basePackage).append(".service.").append(serviceName).append(";\n");
         sb.append("import ").append(basePackage).append(".dto.*;\n");
         sb.append("\n");
 
         // Class
         sb.append("/**\n");
-        sb.append(" * Resource JAX-RS pour ").append(ejb.getInterfaceName()).append(".\n");
+        sb.append(" * Resource JAX-RS — transformation directe de ").append(ejb.getInterfaceName()).append(".\n");
+        sb.append(" * Le code métier est adapté directement dans cette classe.\n");
         sb.append(" */\n");
         sb.append("@Path(\"").append(path).append("\")\n");
         sb.append("@Produces(MediaType.APPLICATION_JSON)\n");
         sb.append("@Consumes(MediaType.APPLICATION_JSON)\n");
+        sb.append("@ApplicationScoped\n");
         sb.append("public class ").append(resourceName).append(" {\n\n");
-
-        sb.append("    @Inject\n");
-        sb.append("    private ").append(serviceName).append(" service;\n\n");
 
         // Méthodes
         for (MethodInfo method : ejb.getMethods()) {
@@ -223,13 +216,12 @@ public class JaxrsProjectGenerator {
         sb.append("    ").append(httpAnnotation).append("\n");
         sb.append("    @Path(\"").append(methodPath).append("\")\n");
 
-        // Paramètres et body
+        // Signature de la méthode
         if (method.needsRequestDto()) {
             String requestDtoName = dtoPrefix + "Request";
             sb.append("    public Response ").append(method.getName())
                     .append("(").append(requestDtoName).append(" request) {\n");
         } else if (!method.getParameters().isEmpty()) {
-            // Un seul paramètre simple → @QueryParam ou @PathParam
             ParameterInfo param = method.getParameters().get(0);
             if (method.getHttpMethod() == MethodInfo.HttpMethod.GET) {
                 sb.append("    public Response ").append(method.getName())
@@ -244,41 +236,44 @@ public class JaxrsProjectGenerator {
             sb.append("    public Response ").append(method.getName()).append("() {\n");
         }
 
-        // Body
-        sb.append("        try {\n");
+        // Corps de la méthode
+        if (method.hasMethodBody()) {
+            // Le corps métier extrait de l'implémentation EJB est injecté directement
+            sb.append("        // --- Logique métier transformée depuis ").append(ejb.getInterfaceName()).append(" ---\n");
+            sb.append("        try {\n");
+            sb.append(indentBody(method.getMethodBody(), 12));
+            sb.append("\n");
 
-        if ("void".equals(method.getReturnType())) {
-            sb.append("            service.").append(method.getName()).append("(");
-            appendServiceCallArgs(sb, method);
-            sb.append(");\n");
-            sb.append("            return Response.noContent().build();\n");
-        } else {
-            String returnVar = method.needsResponseDto() ? "result" : "result";
-            sb.append("            var result = service.").append(method.getName()).append("(");
-            appendServiceCallArgs(sb, method);
-            sb.append(");\n");
-            sb.append("            return Response.ok(result).build();\n");
-        }
-
-        sb.append("        } catch (Exception e) {\n");
-        sb.append("            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)\n");
-        sb.append("                    .entity(new ErrorResponse(e.getMessage()))\n");
-        sb.append("                    .build();\n");
-        sb.append("        }\n");
-        sb.append("    }\n\n");
-    }
-
-    private void appendServiceCallArgs(StringBuilder sb, MethodInfo method) {
-        if (method.needsRequestDto()) {
-            sb.append("request");
-        } else if (!method.getParameters().isEmpty()) {
-            ParameterInfo param = method.getParameters().get(0);
-            if (method.getHttpMethod() == MethodInfo.HttpMethod.GET) {
-                sb.append(param.getName());
+            if ("void".equals(method.getReturnType())) {
+                sb.append("            return Response.noContent().build();\n");
             } else {
-                sb.append("request");
+                sb.append("            // Note: adapter le return ci-dessus en Response.ok(result).build()\n");
             }
+            sb.append("        } catch (Exception e) {\n");
+            sb.append("            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)\n");
+            sb.append("                    .entity(new ErrorResponse(e.getMessage()))\n");
+            sb.append("                    .build();\n");
+            sb.append("        }\n");
+        } else {
+            // Pas de corps disponible → stub TODO
+            sb.append("        try {\n");
+            sb.append("            // TODO: implémenter la logique métier (transformée depuis l'EJB)\n");
+
+            if ("void".equals(method.getReturnType())) {
+                sb.append("            return Response.noContent().build();\n");
+            } else {
+                sb.append("            // TODO: retourner le résultat métier\n");
+                sb.append("            return Response.ok().build();\n");
+            }
+
+            sb.append("        } catch (Exception e) {\n");
+            sb.append("            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)\n");
+            sb.append("                    .entity(new ErrorResponse(e.getMessage()))\n");
+            sb.append("                    .build();\n");
+            sb.append("        }\n");
         }
+
+        sb.append("    }\n\n");
     }
 
     // ===== DTOs =====
@@ -381,93 +376,6 @@ public class JaxrsProjectGenerator {
         Files.writeString(dtoDir.resolve("ErrorResponse.java"), code);
     }
 
-    // ===== Service (JNDI Lookup) =====
-
-    private void generateService(Path serviceDir, EjbInfo ejb) throws IOException {
-        String serviceName = capitalize(ejb.deriveResourceName().replace("-", "")) + "Service";
-        String jndiName = ejb.getJndiName();
-
-        StringBuilder sb = new StringBuilder();
-        sb.append("package ").append(basePackage).append(".service;\n\n");
-        sb.append("import jakarta.annotation.PostConstruct;\n");
-        sb.append("import jakarta.enterprise.context.ApplicationScoped;\n");
-        sb.append("import javax.naming.InitialContext;\n");
-        sb.append("import javax.naming.NamingException;\n");
-        sb.append("import ").append(basePackage).append(".dto.*;\n");
-        sb.append("\n");
-
-        sb.append("/**\n");
-        sb.append(" * Service qui appelle l'EJB ").append(ejb.getInterfaceName()).append(" via JNDI lookup.\n");
-        sb.append(" */\n");
-        sb.append("@ApplicationScoped\n");
-        sb.append("public class ").append(serviceName).append(" {\n\n");
-
-        sb.append("    private static final String JNDI_NAME = \"").append(jndiName).append("\";\n\n");
-
-        // Lookup method
-        sb.append("    @SuppressWarnings(\"unchecked\")\n");
-        sb.append("    private <T> T lookupEjb() {\n");
-        sb.append("        try {\n");
-        sb.append("            InitialContext ctx = new InitialContext();\n");
-        sb.append("            return (T) ctx.lookup(JNDI_NAME);\n");
-        sb.append("        } catch (NamingException e) {\n");
-        sb.append("            throw new RuntimeException(\"JNDI lookup failed for: \" + JNDI_NAME, e);\n");
-        sb.append("        }\n");
-        sb.append("    }\n\n");
-
-        // Méthodes de délégation
-        for (MethodInfo method : ejb.getMethods()) {
-            generateServiceMethod(sb, method, ejb);
-        }
-
-        sb.append("}\n");
-
-        Files.writeString(serviceDir.resolve(serviceName + ".java"), sb.toString());
-        log.debug("Generated service: {}", serviceName);
-    }
-
-    private void generateServiceMethod(StringBuilder sb, MethodInfo method, EjbInfo ejb) {
-        String returnType = method.getReturnType() == null ? "void" : method.getReturnType();
-        String dtoPrefix = capitalize(method.getName());
-
-        sb.append("    public ").append(returnType).append(" ").append(method.getName()).append("(");
-
-        // Paramètres
-        if (method.needsRequestDto() ||
-                (!method.getParameters().isEmpty() && method.getHttpMethod() != MethodInfo.HttpMethod.GET)) {
-            sb.append(dtoPrefix).append("Request request");
-        } else if (!method.getParameters().isEmpty()) {
-            ParameterInfo param = method.getParameters().get(0);
-            sb.append(param.getTypeSimple()).append(" ").append(param.getName());
-        }
-
-        sb.append(") {\n");
-        sb.append("        var ejb = lookupEjb();\n");
-
-        // Appel EJB
-        String callPrefix = "void".equals(returnType) ? "        " : "        return ";
-        sb.append(callPrefix).append("ejb.").append(method.getName()).append("(");
-
-        if (method.needsRequestDto()) {
-            // Extraire les champs du DTO
-            List<ParameterInfo> params = method.getParameters();
-            for (int i = 0; i < params.size(); i++) {
-                if (i > 0) sb.append(", ");
-                sb.append("request.get").append(capitalize(params.get(i).getName())).append("()");
-            }
-        } else if (!method.getParameters().isEmpty()) {
-            ParameterInfo param = method.getParameters().get(0);
-            if (method.getHttpMethod() == MethodInfo.HttpMethod.GET) {
-                sb.append(param.getName());
-            } else {
-                sb.append("request.get").append(capitalize(param.getName())).append("()");
-            }
-        }
-
-        sb.append(");\n");
-        sb.append("    }\n\n");
-    }
-
     // ===== beans.xml =====
 
     private void generateBeansXml(Path resourcesDir) throws IOException {
@@ -503,5 +411,31 @@ public class JaxrsProjectGenerator {
             sb.append(Character.toLowerCase(c));
         }
         return sb.toString();
+    }
+
+    /**
+     * Indente le corps d'une méthode extraite pour l'insérer dans la Resource.
+     * Supprime les accolades ouvrantes/fermantes du bloc et ré-indente.
+     */
+    private String indentBody(String body, int spaces) {
+        if (body == null || body.isBlank()) return "";
+
+        String trimmed = body.strip();
+        // Retirer les { } englobantes du bloc
+        if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+            trimmed = trimmed.substring(1, trimmed.length() - 1).strip();
+        }
+
+        String indent = " ".repeat(spaces);
+        StringBuilder result = new StringBuilder();
+        for (String line : trimmed.split("\\R")) {
+            String stripped = line.stripLeading();
+            if (!stripped.isEmpty()) {
+                result.append(indent).append(stripped).append("\n");
+            } else {
+                result.append("\n");
+            }
+        }
+        return result.toString();
     }
 }

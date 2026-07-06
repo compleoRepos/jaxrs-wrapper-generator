@@ -62,7 +62,7 @@ class JaxrsProjectGeneratorTest {
     }
 
     @Test
-    void generate_shouldCreateServiceWithJndiLookup() throws IOException {
+    void generate_shouldNotCreateServiceLayer() throws IOException {
         // Given
         EjbZipParser parser = new EjbZipParser();
         List<EjbInfo> ejbs = parser.parseDirectory(Path.of("src/test/resources/sample-ejb"));
@@ -70,22 +70,60 @@ class JaxrsProjectGeneratorTest {
         // When
         generator.generate(ejbs, outputDir);
 
-        // Then: Service files exist
+        // Then: NO service directory should exist (transformation directe)
         Path serviceDir = outputDir.resolve("src/main/java/com/bank/api/service");
-        assertTrue(Files.exists(serviceDir));
+        assertFalse(Files.exists(serviceDir),
+                "Service layer should NOT be generated — transformation directe, pas de JNDI wrapper");
+    }
 
-        long serviceCount = Files.list(serviceDir).count();
-        assertEquals(ejbs.size(), serviceCount, "Should have one Service per EJB");
+    @Test
+    void generate_shouldNotContainJndiLookup() throws IOException {
+        // Given
+        EjbZipParser parser = new EjbZipParser();
+        List<EjbInfo> ejbs = parser.parseDirectory(Path.of("src/test/resources/sample-ejb"));
 
-        // Verify JNDI lookup is present in service
-        Files.list(serviceDir).forEach(file -> {
+        // When
+        generator.generate(ejbs, outputDir);
+
+        // Then: Resource files should NOT contain JNDI references
+        Path resourceDir = outputDir.resolve("src/main/java/com/bank/api/resource");
+        Files.list(resourceDir).forEach(file -> {
             try {
                 String content = Files.readString(file);
-                assertTrue(content.contains("InitialContext"), "Service should use JNDI lookup");
-                assertTrue(content.contains("JNDI_NAME"), "Service should have JNDI_NAME constant");
-                assertTrue(content.contains("@ApplicationScoped"), "Service should be CDI managed");
+                assertFalse(content.contains("InitialContext"),
+                        "Resource should NOT use JNDI lookup: " + file.getFileName());
+                assertFalse(content.contains("JNDI_NAME"),
+                        "Resource should NOT reference JNDI: " + file.getFileName());
+                assertFalse(content.contains("lookupEjb"),
+                        "Resource should NOT have lookupEjb: " + file.getFileName());
+                assertFalse(content.contains("@Inject"),
+                        "Resource should NOT inject a service: " + file.getFileName());
             } catch (IOException e) {
-                fail("Failed to read service file: " + e.getMessage());
+                fail("Failed to read resource file: " + e.getMessage());
+            }
+        });
+    }
+
+    @Test
+    void generate_resourceShouldContainBusinessLogicOrTodo() throws IOException {
+        // Given
+        EjbZipParser parser = new EjbZipParser();
+        List<EjbInfo> ejbs = parser.parseDirectory(Path.of("src/test/resources/sample-ejb"));
+
+        // When
+        generator.generate(ejbs, outputDir);
+
+        // Then: Resource files should contain either business logic or TODO stubs
+        Path resourceDir = outputDir.resolve("src/main/java/com/bank/api/resource");
+        Files.list(resourceDir).forEach(file -> {
+            try {
+                String content = Files.readString(file);
+                boolean hasBusinessLogic = content.contains("Logique métier transformée");
+                boolean hasTodoStub = content.contains("TODO: implémenter la logique métier");
+                assertTrue(hasBusinessLogic || hasTodoStub,
+                        "Resource should contain business logic or TODO stub: " + file.getFileName());
+            } catch (IOException e) {
+                fail("Failed to read resource file: " + e.getMessage());
             }
         });
     }
@@ -132,7 +170,8 @@ class JaxrsProjectGeneratorTest {
                         "Resource should produce JSON");
                 assertTrue(content.contains("@Consumes(MediaType.APPLICATION_JSON)"),
                         "Resource should consume JSON");
-                assertTrue(content.contains("@Inject"), "Resource should inject service");
+                assertTrue(content.contains("@ApplicationScoped"),
+                        "Resource should be @ApplicationScoped (CDI managed)");
             } catch (IOException e) {
                 fail("Failed to read resource file: " + e.getMessage());
             }
@@ -140,7 +179,7 @@ class JaxrsProjectGeneratorTest {
     }
 
     @Test
-    void generate_pomShouldHaveJakartaEeDependency() throws IOException {
+    void generate_pomShouldNotHaveEjbDependency() throws IOException {
         // Given
         EjbZipParser parser = new EjbZipParser();
         List<EjbInfo> ejbs = parser.parseDirectory(Path.of("src/test/resources/sample-ejb"));
@@ -148,11 +187,12 @@ class JaxrsProjectGeneratorTest {
         // When
         generator.generate(ejbs, outputDir);
 
-        // Then
+        // Then: POM should have Jakarta EE but NOT EJB API
         String pom = Files.readString(outputDir.resolve("pom.xml"));
         assertTrue(pom.contains("jakarta.jakartaee-api"), "POM should have Jakarta EE API");
         assertTrue(pom.contains("jakarta.json.bind-api"), "POM should have JSON-B");
-        assertTrue(pom.contains("jakarta.ejb-api"), "POM should have EJB API");
+        assertFalse(pom.contains("jakarta.ejb-api"),
+                "POM should NOT have EJB API — transformation directe, pas de dépendance EJB");
         assertTrue(pom.contains("<packaging>war</packaging>"), "Should be WAR packaging");
     }
 
@@ -180,5 +220,50 @@ class JaxrsProjectGeneratorTest {
         assertTrue(content.contains("@POST"), "Should have POST for enregistrer method");
         // annuler → @DELETE
         assertTrue(content.contains("@DELETE"), "Should have DELETE for annuler method");
+    }
+
+    @Test
+    void generate_resourceShouldContainMethodBodyFromImplementation() throws IOException {
+        // Given
+        EjbZipParser parser = new EjbZipParser();
+        List<EjbInfo> ejbs = parser.parseDirectory(Path.of("src/test/resources/sample-ejb"));
+
+        // When
+        generator.generate(ejbs, outputDir);
+
+        // Then: check that at least one resource has extracted method body
+        Path resourceDir = outputDir.resolve("src/main/java/com/bank/api/resource");
+        boolean foundBodyContent = false;
+        for (Path file : Files.list(resourceDir).toList()) {
+            String content = Files.readString(file);
+            if (content.contains("Logique métier transformée")) {
+                foundBodyContent = true;
+                break;
+            }
+        }
+        assertTrue(foundBodyContent,
+                "At least one Resource should contain extracted business logic from EJB implementation");
+    }
+
+    @Test
+    void generate_resourceClassShouldNotImportService() throws IOException {
+        // Given
+        EjbZipParser parser = new EjbZipParser();
+        List<EjbInfo> ejbs = parser.parseDirectory(Path.of("src/test/resources/sample-ejb"));
+
+        // When
+        generator.generate(ejbs, outputDir);
+
+        // Then: Resource should not import any service class
+        Path resourceDir = outputDir.resolve("src/main/java/com/bank/api/resource");
+        Files.list(resourceDir).forEach(file -> {
+            try {
+                String content = Files.readString(file);
+                assertFalse(content.contains("import " + "com.bank.api.service."),
+                        "Resource should NOT import service layer: " + file.getFileName());
+            } catch (IOException e) {
+                fail("Failed to read resource file: " + e.getMessage());
+            }
+        });
     }
 }

@@ -4,7 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Représente une méthode d'un EJB à wrapper en endpoint REST.
+ * Représente une méthode d'un EJB à transformer en endpoint REST.
  */
 public class MethodInfo {
 
@@ -14,6 +14,7 @@ public class MethodInfo {
     private List<ParameterInfo> parameters = new ArrayList<>();
     private List<String> thrownExceptions = new ArrayList<>();
     private HttpMethod httpMethod;
+    private String methodBody;
 
     public enum HttpMethod {
         GET, POST, PUT, DELETE
@@ -50,6 +51,16 @@ public class MethodInfo {
 
     public HttpMethod getHttpMethod() { return httpMethod; }
     public void setHttpMethod(HttpMethod httpMethod) { this.httpMethod = httpMethod; }
+
+    public String getMethodBody() { return methodBody; }
+    public void setMethodBody(String methodBody) { this.methodBody = methodBody; }
+
+    /**
+     * Indique si le corps de la méthode a été extrait depuis l'implémentation EJB.
+     */
+    public boolean hasMethodBody() {
+        return methodBody != null && !methodBody.isBlank();
+    }
 
     /**
      * Déduit la méthode HTTP à partir du nom de la méthode Java.

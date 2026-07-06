@@ -21,13 +21,15 @@ import java.nio.file.*;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
 import java.util.zip.ZipInputStream;
 
 /**
- * Parse un projet EJB depuis un fichier .zip.
+ * Parse un projet EJB depuis un fichier .zip ou un répertoire.
  * Extrait les interfaces @Remote/@Local et les classes @Stateless/@Stateful/@Singleton.
  * Produit une liste d'EjbInfo prêts à être transformés en JAX-RS Resources.
+ * <p>
+ * Le parser extrait également le corps des méthodes depuis les implémentations
+ * (@Stateless, etc.) pour permettre une transformation directe du code métier.
  */
 public class EjbZipParser {
 
@@ -85,22 +87,34 @@ public class EjbZipParser {
         Map<String, EjbInfo> interfaceMap = new LinkedHashMap<>();
         // Phase 2: identifier les implémentations @Stateless etc.
         Map<String, String> implToInterface = new LinkedHashMap<>();
+        // Phase 3: stocker les corps de méthodes des implémentations
+        Map<String, Map<String, String>> implMethodBodies = new LinkedHashMap<>();
 
         for (Path file : javaFiles) {
-            parseJavaFile(file, interfaceMap, implToInterface);
+            parseJavaFile(file, interfaceMap, implToInterface, implMethodBodies);
         }
 
-        // Phase 3: résoudre les implémentations
+        // Phase 4: résoudre les implémentations et injecter les corps de méthodes
         for (var entry : implToInterface.entrySet()) {
             String implName = entry.getKey();
             String ifaceName = entry.getValue();
             EjbInfo ejb = interfaceMap.get(ifaceName);
             if (ejb != null) {
                 ejb.setImplementationName(implName);
+                // Injecter les corps de méthodes depuis l'implémentation
+                Map<String, String> bodies = implMethodBodies.get(implName);
+                if (bodies != null) {
+                    for (MethodInfo method : ejb.getMethods()) {
+                        String body = bodies.get(method.getName());
+                        if (body != null) {
+                            method.setMethodBody(body);
+                        }
+                    }
+                }
             }
         }
 
-        // Phase 4: si aucune interface @Remote/@Local trouvée, traiter les @Stateless directement
+        // Phase 5: si aucune interface @Remote/@Local trouvée, traiter les @Stateless directement
         if (interfaceMap.isEmpty()) {
             log.info("No @Remote/@Local interfaces found, parsing @Stateless classes directly");
             for (Path file : javaFiles) {
@@ -127,7 +141,8 @@ public class EjbZipParser {
     }
 
     private void parseJavaFile(Path file, Map<String, EjbInfo> interfaceMap,
-                               Map<String, String> implToInterface) {
+                               Map<String, String> implToInterface,
+                               Map<String, Map<String, String>> implMethodBodies) {
         try {
             String source = Files.readString(file, StandardCharsets.UTF_8);
             ParseResult<CompilationUnit> result = javaParser.parse(source);
@@ -180,6 +195,12 @@ public class EjbZipParser {
                             ejb.setImplementationName(decl.getNameAsString());
                             if (jndiName != null) ejb.setJndiName(jndiName);
                         }
+
+                        // Extraire les corps de méthodes de l'implémentation
+                        Map<String, String> bodies = extractMethodBodies(decl);
+                        if (!bodies.isEmpty()) {
+                            implMethodBodies.put(decl.getNameAsString(), bodies);
+                        }
                     }
                 }
             }
@@ -211,7 +232,7 @@ public class EjbZipParser {
                     ejb.setImplementationName(decl.getNameAsString());
                     ejb.setEjbType(EjbInfo.EjbType.valueOf(ejbAnnotation.get().getNameAsString().toUpperCase()));
                     ejb.setJndiName(extractJndiName(ejbAnnotation.get(), decl.getNameAsString()));
-                    extractMethods(decl, ejb);
+                    extractMethodsWithBodies(decl, ejb);
                     interfaceMap.put(decl.getNameAsString(), ejb);
                     log.debug("Found @Stateless class (no interface): {}", decl.getNameAsString());
                 }
@@ -244,8 +265,57 @@ public class EjbZipParser {
                 method.getThrownExceptions().add(ex.asString());
             });
 
+            // Corps de méthode (si c'est une classe, pas une interface)
+            md.getBody().ifPresent(body -> method.setMethodBody(body.toString()));
+
             ejb.addMethod(method);
         }
+    }
+
+    /**
+     * Extrait les méthodes avec leurs corps depuis une classe d'implémentation.
+     * Utilisé quand le @Stateless est traité directement (pas d'interface séparée).
+     */
+    private void extractMethodsWithBodies(ClassOrInterfaceDeclaration decl, EjbInfo ejb) {
+        for (MethodDeclaration md : decl.getMethods()) {
+            if (md.isPrivate() || md.isProtected()) continue;
+
+            MethodInfo method = new MethodInfo(
+                    md.getNameAsString(),
+                    md.getType().asString()
+            );
+
+            // Paramètres
+            md.getParameters().forEach(p -> {
+                method.addParameter(new ParameterInfo(
+                        p.getNameAsString(),
+                        p.getType().asString()
+                ));
+            });
+
+            // Exceptions
+            md.getThrownExceptions().forEach(ex -> {
+                method.getThrownExceptions().add(ex.asString());
+            });
+
+            // Corps de méthode
+            md.getBody().ifPresent(body -> method.setMethodBody(body.toString()));
+
+            ejb.addMethod(method);
+        }
+    }
+
+    /**
+     * Extrait les corps de toutes les méthodes publiques d'une classe.
+     * Retourne un Map(nomMéthode → corps).
+     */
+    private Map<String, String> extractMethodBodies(ClassOrInterfaceDeclaration decl) {
+        Map<String, String> bodies = new LinkedHashMap<>();
+        for (MethodDeclaration md : decl.getMethods()) {
+            if (md.isPrivate() || md.isProtected()) continue;
+            md.getBody().ifPresent(body -> bodies.put(md.getNameAsString(), body.toString()));
+        }
+        return bodies;
     }
 
     private String extractJndiName(AnnotationExpr annotation, String className) {
