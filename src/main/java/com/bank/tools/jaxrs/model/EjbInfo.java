@@ -17,7 +17,7 @@ public class EjbInfo {
     private List<MethodInfo> methods = new ArrayList<>();
 
     public enum EjbType {
-        STATELESS, STATEFUL, SINGLETON, MESSAGE_DRIVEN
+        STATELESS, STATEFUL, SINGLETON, MESSAGE_DRIVEN, WEBSERVICE
     }
 
     public EjbInfo() {}
@@ -56,7 +56,7 @@ public class EjbInfo {
     public String deriveResourceName() {
         String name = interfaceName;
         // Retirer les suffixes courants
-        for (String suffix : List.of("Service", "Remote", "Local", "Bean", "EJB", "Facade")) {
+        for (String suffix : List.of("Service", "Remote", "Local", "Bean", "EJB", "Facade", "WS", "WebService")) {
             if (name.endsWith(suffix)) {
                 name = name.substring(0, name.length() - suffix.length());
                 break;

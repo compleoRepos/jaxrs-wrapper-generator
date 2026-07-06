@@ -25,11 +25,15 @@ import java.util.zip.ZipInputStream;
 
 /**
  * Parse un projet EJB depuis un fichier .zip ou un répertoire.
- * Extrait les interfaces @Remote/@Local et les classes @Stateless/@Stateful/@Singleton.
+ * Détecte :
+ * <ul>
+ *   <li>Interfaces @Remote/@Local et classes @Stateless/@Stateful/@Singleton (EJB classique)</li>
+ *   <li>Classes @WebService avec @WebMethod (JAX-WS SOAP)</li>
+ * </ul>
  * Produit une liste d'EjbInfo prêts à être transformés en JAX-RS Resources.
  * <p>
  * Le parser extrait également le corps des méthodes depuis les implémentations
- * (@Stateless, etc.) pour permettre une transformation directe du code métier.
+ * pour permettre une transformation directe du code métier.
  */
 public class EjbZipParser {
 
@@ -40,6 +44,12 @@ public class EjbZipParser {
     );
     private static final Set<String> INTERFACE_ANNOTATIONS = Set.of(
             "Remote", "Local"
+    );
+    private static final Set<String> WEBSERVICE_ANNOTATIONS = Set.of(
+            "WebService"
+    );
+    private static final Set<String> WEBMETHOD_ANNOTATIONS = Set.of(
+            "WebMethod"
     );
 
     private final JavaParser javaParser = new JavaParser();
@@ -69,14 +79,16 @@ public class EjbZipParser {
     public List<EjbInfo> parseDirectory(Path projectDir) throws IOException {
         log.info("Scanning directory: {}", projectDir);
 
-        // Collecter tous les fichiers .java
+        // Collecter tous les fichiers .java (hors src/test et target)
         List<Path> javaFiles;
         try (var stream = Files.walk(projectDir)) {
             javaFiles = stream
                     .filter(p -> p.toString().endsWith(".java"))
                     .filter(p -> {
+                        // Utiliser le chemin relatif au répertoire du projet
                         String rel = projectDir.relativize(p).toString();
-                        return !rel.contains("/test/") && !rel.startsWith("test/");
+                        return !rel.startsWith("test/") && !rel.contains("/test/java/")
+                                && !rel.contains("/target/");
                     })
                     .collect(Collectors.toList());
         }
@@ -89,19 +101,20 @@ public class EjbZipParser {
         Map<String, String> implToInterface = new LinkedHashMap<>();
         // Phase 3: stocker les corps de méthodes des implémentations
         Map<String, Map<String, String>> implMethodBodies = new LinkedHashMap<>();
+        // Phase 4: identifier les classes @WebService
+        List<EjbInfo> webServiceEjbs = new ArrayList<>();
 
         for (Path file : javaFiles) {
-            parseJavaFile(file, interfaceMap, implToInterface, implMethodBodies);
+            parseJavaFile(file, interfaceMap, implToInterface, implMethodBodies, webServiceEjbs);
         }
 
-        // Phase 4: résoudre les implémentations et injecter les corps de méthodes
+        // Phase 5: résoudre les implémentations et injecter les corps de méthodes
         for (var entry : implToInterface.entrySet()) {
             String implName = entry.getKey();
             String ifaceName = entry.getValue();
             EjbInfo ejb = interfaceMap.get(ifaceName);
             if (ejb != null) {
                 ejb.setImplementationName(implName);
-                // Injecter les corps de méthodes depuis l'implémentation
                 Map<String, String> bodies = implMethodBodies.get(implName);
                 if (bodies != null) {
                     for (MethodInfo method : ejb.getMethods()) {
@@ -114,7 +127,7 @@ public class EjbZipParser {
             }
         }
 
-        // Phase 5: si aucune interface @Remote/@Local trouvée, traiter les @Stateless directement
+        // Phase 6: si aucune interface @Remote/@Local trouvée, traiter les @Stateless directement
         if (interfaceMap.isEmpty()) {
             log.info("No @Remote/@Local interfaces found, parsing @Stateless classes directly");
             for (Path file : javaFiles) {
@@ -122,7 +135,23 @@ public class EjbZipParser {
             }
         }
 
+        // Phase 7: si toujours rien, ajouter les @WebService détectés
+        if (interfaceMap.isEmpty() && !webServiceEjbs.isEmpty()) {
+            log.info("No EJB classes found, using {} @WebService classes", webServiceEjbs.size());
+            for (EjbInfo ws : webServiceEjbs) {
+                interfaceMap.put(ws.getInterfaceName(), ws);
+            }
+        } else if (!interfaceMap.isEmpty() && !webServiceEjbs.isEmpty()) {
+            // Ajouter les @WebService en complément si pas déjà présents
+            for (EjbInfo ws : webServiceEjbs) {
+                if (!interfaceMap.containsKey(ws.getInterfaceName())) {
+                    interfaceMap.put(ws.getInterfaceName(), ws);
+                }
+            }
+        }
+
         List<EjbInfo> result = new ArrayList<>(interfaceMap.values());
+
         // Déduire les méthodes HTTP
         for (EjbInfo ejb : result) {
             for (MethodInfo method : ejb.getMethods()) {
@@ -142,7 +171,8 @@ public class EjbZipParser {
 
     private void parseJavaFile(Path file, Map<String, EjbInfo> interfaceMap,
                                Map<String, String> implToInterface,
-                               Map<String, Map<String, String>> implMethodBodies) {
+                               Map<String, Map<String, String>> implMethodBodies,
+                               List<EjbInfo> webServiceEjbs) {
         try {
             String source = Files.readString(file, StandardCharsets.UTF_8);
             ParseResult<CompilationUnit> result = javaParser.parse(source);
@@ -172,40 +202,117 @@ public class EjbZipParser {
                             .findFirst();
 
                     if (ejbAnnotation.isPresent()) {
-                        String ejbTypeName = ejbAnnotation.get().getNameAsString();
-                        EjbInfo.EjbType ejbType = EjbInfo.EjbType.valueOf(ejbTypeName.toUpperCase());
+                        handleEjbClass(decl, ejbAnnotation.get(), interfaceMap, implToInterface, implMethodBodies);
+                    }
 
-                        // Trouver l'interface implémentée
-                        String ifaceName = decl.getImplementedTypes().stream()
-                                .map(t -> t.getNameAsString())
-                                .findFirst()
-                                .orElse(null);
+                    // Vérifier si c'est un @WebService
+                    Optional<AnnotationExpr> wsAnnotation = decl.getAnnotations().stream()
+                            .filter(a -> WEBSERVICE_ANNOTATIONS.contains(a.getNameAsString()))
+                            .findFirst();
 
-                        if (ifaceName != null) {
-                            implToInterface.put(decl.getNameAsString(), ifaceName);
-                        }
-
-                        // Extraire le JNDI name depuis l'annotation si présent
-                        String jndiName = extractJndiName(ejbAnnotation.get(), decl.getNameAsString());
-
-                        // Si l'interface existe déjà dans la map, mettre à jour
-                        if (ifaceName != null && interfaceMap.containsKey(ifaceName)) {
-                            EjbInfo ejb = interfaceMap.get(ifaceName);
-                            ejb.setEjbType(ejbType);
-                            ejb.setImplementationName(decl.getNameAsString());
-                            if (jndiName != null) ejb.setJndiName(jndiName);
-                        }
-
-                        // Extraire les corps de méthodes de l'implémentation
-                        Map<String, String> bodies = extractMethodBodies(decl);
-                        if (!bodies.isEmpty()) {
-                            implMethodBodies.put(decl.getNameAsString(), bodies);
-                        }
+                    if (wsAnnotation.isPresent()) {
+                        handleWebServiceClass(decl, wsAnnotation.get(), packageName, webServiceEjbs);
                     }
                 }
             }
         } catch (Exception e) {
             log.warn("Failed to parse file: {} - {}", file, e.getMessage());
+        }
+    }
+
+    private void handleEjbClass(ClassOrInterfaceDeclaration decl, AnnotationExpr ejbAnnotation,
+                                Map<String, EjbInfo> interfaceMap,
+                                Map<String, String> implToInterface,
+                                Map<String, Map<String, String>> implMethodBodies) {
+        String ejbTypeName = ejbAnnotation.getNameAsString();
+        EjbInfo.EjbType ejbType = EjbInfo.EjbType.valueOf(ejbTypeName.toUpperCase());
+
+        // Trouver l'interface implémentée
+        String ifaceName = decl.getImplementedTypes().stream()
+                .map(t -> t.getNameAsString())
+                .findFirst()
+                .orElse(null);
+
+        if (ifaceName != null) {
+            implToInterface.put(decl.getNameAsString(), ifaceName);
+        }
+
+        // Extraire le JNDI name depuis l'annotation si présent
+        String jndiName = extractAnnotationName(ejbAnnotation, decl.getNameAsString());
+
+        // Si l'interface existe déjà dans la map, mettre à jour
+        if (ifaceName != null && interfaceMap.containsKey(ifaceName)) {
+            EjbInfo ejb = interfaceMap.get(ifaceName);
+            ejb.setEjbType(ejbType);
+            ejb.setImplementationName(decl.getNameAsString());
+            if (jndiName != null) ejb.setJndiName(jndiName);
+        }
+
+        // Extraire les corps de méthodes de l'implémentation
+        Map<String, String> bodies = extractMethodBodies(decl);
+        if (!bodies.isEmpty()) {
+            implMethodBodies.put(decl.getNameAsString(), bodies);
+        }
+    }
+
+    /**
+     * Traite une classe annotée @WebService : extrait les méthodes @WebMethod
+     * comme des opérations à transformer en endpoints REST.
+     */
+    private void handleWebServiceClass(ClassOrInterfaceDeclaration decl, AnnotationExpr wsAnnotation,
+                                       String packageName, List<EjbInfo> webServiceEjbs) {
+        EjbInfo ejb = new EjbInfo(decl.getNameAsString(), packageName);
+        ejb.setImplementationName(decl.getNameAsString());
+        ejb.setEjbType(EjbInfo.EjbType.WEBSERVICE);
+
+        // Extraire le serviceName depuis @WebService si disponible
+        String serviceName = extractAnnotationAttribute(wsAnnotation, "serviceName");
+        if (serviceName != null) {
+            ejb.setJndiName(serviceName);
+        }
+
+        // Extraire les méthodes @WebMethod (ou toutes les méthodes publiques si pas d'annotation @WebMethod)
+        boolean hasWebMethodAnnotations = decl.getMethods().stream()
+                .anyMatch(md -> md.getAnnotations().stream()
+                        .anyMatch(a -> WEBMETHOD_ANNOTATIONS.contains(a.getNameAsString())));
+
+        for (MethodDeclaration md : decl.getMethods()) {
+            if (md.isPrivate() || md.isProtected()) continue;
+
+            // Si des @WebMethod existent, ne prendre que celles annotées
+            if (hasWebMethodAnnotations) {
+                boolean isWebMethod = md.getAnnotations().stream()
+                        .anyMatch(a -> WEBMETHOD_ANNOTATIONS.contains(a.getNameAsString()));
+                if (!isWebMethod) continue;
+            }
+
+            MethodInfo method = new MethodInfo(
+                    md.getNameAsString(),
+                    md.getType().asString()
+            );
+
+            // Paramètres (ignorer les annotations @WebParam pour le nom)
+            md.getParameters().forEach(p -> {
+                method.addParameter(new ParameterInfo(
+                        p.getNameAsString(),
+                        p.getType().asString()
+                ));
+            });
+
+            // Exceptions
+            md.getThrownExceptions().forEach(ex -> {
+                method.getThrownExceptions().add(ex.asString());
+            });
+
+            // Corps de méthode
+            md.getBody().ifPresent(body -> method.setMethodBody(body.toString()));
+
+            ejb.addMethod(method);
+        }
+
+        if (!ejb.getMethods().isEmpty()) {
+            webServiceEjbs.add(ejb);
+            log.debug("Found @WebService class: {} ({} methods)", decl.getNameAsString(), ejb.getMethods().size());
         }
     }
 
@@ -231,7 +338,7 @@ public class EjbZipParser {
                     EjbInfo ejb = new EjbInfo(decl.getNameAsString(), packageName);
                     ejb.setImplementationName(decl.getNameAsString());
                     ejb.setEjbType(EjbInfo.EjbType.valueOf(ejbAnnotation.get().getNameAsString().toUpperCase()));
-                    ejb.setJndiName(extractJndiName(ejbAnnotation.get(), decl.getNameAsString()));
+                    ejb.setJndiName(extractAnnotationName(ejbAnnotation.get(), decl.getNameAsString()));
                     extractMethodsWithBodies(decl, ejb);
                     interfaceMap.put(decl.getNameAsString(), ejb);
                     log.debug("Found @Stateless class (no interface): {}", decl.getNameAsString());
@@ -244,7 +351,6 @@ public class EjbZipParser {
 
     private void extractMethods(ClassOrInterfaceDeclaration decl, EjbInfo ejb) {
         for (MethodDeclaration md : decl.getMethods()) {
-            // Ignorer les méthodes privées/protected
             if (md.isPrivate() || md.isProtected()) continue;
 
             MethodInfo method = new MethodInfo(
@@ -252,7 +358,6 @@ public class EjbZipParser {
                     md.getType().asString()
             );
 
-            // Paramètres
             md.getParameters().forEach(p -> {
                 method.addParameter(new ParameterInfo(
                         p.getNameAsString(),
@@ -260,12 +365,10 @@ public class EjbZipParser {
                 ));
             });
 
-            // Exceptions
             md.getThrownExceptions().forEach(ex -> {
                 method.getThrownExceptions().add(ex.asString());
             });
 
-            // Corps de méthode (si c'est une classe, pas une interface)
             md.getBody().ifPresent(body -> method.setMethodBody(body.toString()));
 
             ejb.addMethod(method);
@@ -285,7 +388,6 @@ public class EjbZipParser {
                     md.getType().asString()
             );
 
-            // Paramètres
             md.getParameters().forEach(p -> {
                 method.addParameter(new ParameterInfo(
                         p.getNameAsString(),
@@ -293,12 +395,10 @@ public class EjbZipParser {
                 ));
             });
 
-            // Exceptions
             md.getThrownExceptions().forEach(ex -> {
                 method.getThrownExceptions().add(ex.asString());
             });
 
-            // Corps de méthode
             md.getBody().ifPresent(body -> method.setMethodBody(body.toString()));
 
             ejb.addMethod(method);
@@ -307,7 +407,6 @@ public class EjbZipParser {
 
     /**
      * Extrait les corps de toutes les méthodes publiques d'une classe.
-     * Retourne un Map(nomMéthode → corps).
      */
     private Map<String, String> extractMethodBodies(ClassOrInterfaceDeclaration decl) {
         Map<String, String> bodies = new LinkedHashMap<>();
@@ -318,17 +417,46 @@ public class EjbZipParser {
         return bodies;
     }
 
-    private String extractJndiName(AnnotationExpr annotation, String className) {
+    /**
+     * Extrait le nom JNDI ou mappedName depuis une annotation EJB.
+     */
+    private String extractAnnotationName(AnnotationExpr annotation, String className) {
         if (annotation instanceof NormalAnnotationExpr normal) {
             for (MemberValuePair pair : normal.getPairs()) {
                 if ("mappedName".equals(pair.getNameAsString()) || "name".equals(pair.getNameAsString())) {
-                    return pair.getValue().asStringLiteralExpr().getValue();
+                    try {
+                        return pair.getValue().asStringLiteralExpr().getValue();
+                    } catch (Exception e) {
+                        // Pas une string literal
+                    }
                 }
             }
         } else if (annotation instanceof SingleMemberAnnotationExpr single) {
-            return single.getMemberValue().asStringLiteralExpr().getValue();
+            try {
+                return single.getMemberValue().asStringLiteralExpr().getValue();
+            } catch (Exception e) {
+                // Pas une string literal
+            }
         }
         return "java:global/" + className;
+    }
+
+    /**
+     * Extrait un attribut spécifique depuis une annotation (ex: serviceName de @WebService).
+     */
+    private String extractAnnotationAttribute(AnnotationExpr annotation, String attributeName) {
+        if (annotation instanceof NormalAnnotationExpr normal) {
+            for (MemberValuePair pair : normal.getPairs()) {
+                if (attributeName.equals(pair.getNameAsString())) {
+                    try {
+                        return pair.getValue().asStringLiteralExpr().getValue();
+                    } catch (Exception e) {
+                        return null;
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     // --- Utilitaires ZIP ---

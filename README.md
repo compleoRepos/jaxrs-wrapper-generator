@@ -1,17 +1,27 @@
-# JAX-RS Generator — Transformation directe EJB → JAX-RS
+# JAX-RS Generator — Transformation directe EJB/SOAP → JAX-RS
 
-Module Maven indépendant qui prend un projet EJB en entrée (`.zip` ou répertoire) et génère un projet **JAX-RS natif** avec des DTOs JSON.
+Module Maven indépendant qui prend un projet EJB ou JAX-WS (SOAP) en entrée (`.zip` ou répertoire) et génère un projet **JAX-RS REST natif** avec des DTOs JSON.
 
-**Approche : transformation directe** — le code métier de l'EJB est adapté directement dans les endpoints REST. Pas de proxy JNDI, pas de couche Service intermédiaire, pas de dépendance EJB dans le projet généré.
+**Approche : transformation directe** — le code métier est adapté directement dans les endpoints REST. Pas de proxy JNDI, pas de couche Service intermédiaire, pas de dépendance EJB dans le projet généré.
+
+## Types de projets supportés
+
+| Type source | Annotations détectées | Résultat |
+|---|---|---|
+| EJB classique (interface + impl) | `@Remote`/`@Local` + `@Stateless`/`@Stateful`/`@Singleton` | Resource JAX-RS avec corps métier |
+| EJB sans interface | `@Stateless` seul (classe directe) | Resource JAX-RS avec corps métier |
+| JAX-WS SOAP | `@WebService` + `@WebMethod` | Resource JAX-RS avec corps métier |
+| Spring Boot REST | `@RestController` | **Ignoré** (déjà REST) |
 
 ## Fonctionnalités
 
 | Fonctionnalité | Description |
 |---|---|
-| Parser EJB | Détecte les interfaces `@Remote`/`@Local` et les classes `@Stateless`/`@Stateful`/`@Singleton`, extrait méthodes, paramètres et **corps de méthodes** |
-| Transformation directe | Le code métier de l'implémentation EJB est injecté directement dans la Resource JAX-RS |
-| Génération Resources JAX-RS | `@Path`, `@GET`, `@POST`, `@PUT`, `@DELETE`, `@Consumes`/`@Produces` JSON, `@ApplicationScoped` |
-| Génération DTOs | Request/Response en JSON pour chaque méthode (plus de XML/SOAP) |
+| Parser EJB | Détecte `@Remote`/`@Local`, `@Stateless`/`@Stateful`/`@Singleton`, extrait méthodes, paramètres et **corps** |
+| Parser JAX-WS | Détecte `@WebService` + `@WebMethod`, extrait le serviceName, les opérations et leurs corps |
+| Transformation directe | Le code métier est injecté directement dans la Resource JAX-RS |
+| Génération Resources | `@Path`, `@GET`/`@POST`/`@PUT`/`@DELETE`, `@Consumes`/`@Produces` JSON, `@ApplicationScoped` |
+| Génération DTOs | Request/Response en JSON pour chaque méthode |
 | Inférence HTTP | Détermine GET/POST/PUT/DELETE à partir du nom de la méthode |
 | CLI picocli | Exécution en ligne de commande |
 
@@ -41,20 +51,30 @@ mvn clean install
 ```bash
 # Depuis un .zip
 java -jar target/jaxrs-wrapper-generator-1.0.0-SNAPSHOT-jar-with-dependencies.jar \
-  --input /path/to/projet-ejb.zip \
-  --output /path/to/output \
-  --group-id com.bank.api \
-  --artifact-id mon-service-rest \
-  --base-package com.bank.api
+  /path/to/projet-ejb.zip \
+  -o /path/to/output \
+  -g com.bank.api \
+  -a mon-service-rest \
+  -p com.bank.api
 
 # Depuis un répertoire
 java -jar target/jaxrs-wrapper-generator-1.0.0-SNAPSHOT-jar-with-dependencies.jar \
-  --input /path/to/projet-ejb/ \
-  --output /path/to/output \
-  --group-id com.bank.api \
-  --artifact-id mon-service-rest \
-  --base-package com.bank.api
+  /path/to/projet-ejb/ \
+  -o /path/to/output \
+  -g com.bank.api \
+  -a mon-service-rest \
+  -p com.bank.api
 ```
+
+### Options CLI
+
+| Option | Description | Défaut |
+|---|---|---|
+| `<input>` | Chemin vers le projet EJB/SOAP (.zip ou répertoire) | *obligatoire* |
+| `-o, --output` | Répertoire de sortie | `./generated-jaxrs` |
+| `-g, --group-id` | GroupId Maven | `com.bank.generated` |
+| `-a, --artifact-id` | ArtifactId Maven | déduit du nom du projet |
+| `-p, --package` | Package de base | déduit du groupId |
 
 ### Comme dépendance Maven
 
@@ -98,7 +118,7 @@ output/
 
 ## Comportement de la transformation
 
-1. **Si le corps de la méthode est disponible** (implémentation `@Stateless` trouvée) :
+1. **Si le corps de la méthode est disponible** (implémentation `@Stateless` ou classe `@WebService` trouvée) :
    le code métier est extrait et injecté directement dans la Resource JAX-RS.
 
 2. **Si seule l'interface est disponible** (pas d'implémentation) :
@@ -119,26 +139,50 @@ output/
 mvn test
 ```
 
-16 tests unitaires et d'intégration couvrant :
-- Parsing d'interfaces EJB depuis un répertoire et un .zip
-- Extraction des paramètres, types de retour et corps de méthodes
-- Inférence des méthodes HTTP
-- Génération complète du projet (POM, Resources, DTOs)
-- Validation de l'absence de JNDI/Service layer
-- Validation de la présence du code métier extrait
+**50 tests** au total :
+- `EjbZipParserTest` (5) : parsing EJB classique (@Remote/@Stateless)
+- `WebServiceParserTest` (5) : parsing @WebService/SOAP, Spring Boot ignoré
+- `JaxrsProjectGeneratorTest` (11) : génération et structure du projet
+- `RealProjectsIntegrationTest` (9) : projets réels (ZIP fournis)
+- `FullAuditTest` (20) : audit exhaustif sur 19 projets
 
 ## Architecture
 
 ```
 src/main/java/com/bank/tools/jaxrs/
 ├── model/
-│   ├── EjbInfo.java          (modèle d'un EJB parsé)
+│   ├── EjbInfo.java          (modèle d'un EJB/WebService parsé, enum EjbType)
 │   ├── MethodInfo.java       (modèle d'une méthode avec corps et inférence HTTP)
 │   └── ParameterInfo.java    (modèle d'un paramètre)
 ├── parser/
-│   └── EjbZipParser.java     (parse .zip ou répertoire, extrait corps de méthodes)
+│   └── EjbZipParser.java     (parse .zip ou répertoire, détecte EJB + @WebService)
 ├── generator/
-│   └── JaxrsProjectGenerator.java  (transformation directe EJB → JAX-RS)
+│   └── JaxrsProjectGenerator.java  (transformation directe → JAX-RS)
 └── cli/
     └── JaxrsGeneratorCli.java      (CLI picocli)
 ```
+
+## Audit des projets réels (19 projets testés)
+
+| Projet | EJBs | Méthodes | Corps extraits | Type |
+|---|:---:|:---:|:---:|---|
+| commande-chequier-bmcedirect | 1 | 3 | 3 | STATELESS |
+| activation-carte-bmcedirect | 1 | 1 | 1 | STATELESS |
+| interface-credit-jocker | 2 | 16 | 16 | WEBSERVICE |
+| avis-opere | 1 | 1 | 1 | STATELESS |
+| coordonnees-3dsecure-bmcedirect | 1 | 1 | 1 | STATELESS |
+| demande-dotation | 1 | 7 | 7 | STATELESS |
+| interface-send-sms | 2 | 2 | 2 | WEBSERVICE |
+| mise-disposition-bmcedirect | 1 | 2 | 2 | STATELESS |
+| operation-avenir-services | 1 | 1 | 1 | STATELESS |
+| opposition-carte-bmcedirect | 1 | 1 | 1 | STATELESS |
+| produits-epargne-bmcedirect | 2 | 4 | 4 | STATELESS |
+| push-notification | 1 | 1 | 1 | STATELESS |
+| releve-carte-bmcedirect | 1 | 5 | 5 | STATELESS |
+| souscription-assistance-bmcedirect | 1 | 4 | 4 | STATELESS |
+| souscription-opv-bmcedirect | 1 | 1 | 1 | STATELESS |
+| tockenisation-carte-bmcedirect | 1 | 1 | 1 | STATELESS |
+| transfert-euro-bmce-direct | 0 | 0 | 0 | *(déjà REST)* |
+| vente-distance-carte-monetique | 1 | 1 | 1 | STATELESS |
+| virement-permanent-bmcedirect | 1 | 26 | 26 | STATELESS |
+| **TOTAL** | **20** | **78** | **78** | |
