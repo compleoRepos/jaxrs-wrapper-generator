@@ -8,27 +8,39 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.file.*;
-import java.util.List;
+import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
- * Génère un projet JAX-RS natif à partir d'une liste d'EjbInfo.
+ * Génère un module WAR adaptateur JAX-RS à déployer dans le même EAR que l'EJB existant.
  * <p>
- * Effectue une <strong>transformation directe</strong> du code EJB en endpoints REST :
- * le code métier est adapté directement dans les Resources JAX-RS, sans couche
- * intermédiaire Service/JNDI.
- * <p>
- * Produit :
+ * Le code généré cible <strong>Java 7/8</strong> et <strong>WebSphere</strong> (Java EE 7) :
  * <ul>
- *   <li>POM avec dépendances Jakarta EE 10 / JAX-RS 3.x / JSON-B 3.x</li>
- *   <li>Resources JAX-RS (@Path, @GET, @POST, @Consumes/@Produces JSON) contenant la logique métier</li>
- *   <li>DTOs Request/Response en JSON</li>
- *   <li>Application JAX-RS config</li>
- *   <li>beans.xml pour CDI</li>
+ *   <li>Packages javax.* (pas jakarta.*)</li>
+ *   <li>JAX-RS 2.0 / EJB 3.2 / JSON-P 1.0</li>
+ *   <li>Pas de var, text blocks, List.of(), records</li>
+ *   <li>@EJB lookup compatible WebSphere</li>
+ * </ul>
+ * <p>
+ * Architecture :
+ * <ul>
+ *   <li>Resource JAX-RS : endpoint REST, reçoit le JSON, délègue au service EJB</li>
+ *   <li>DTOs : nommés d'après les champs Envelope (getNodeAsString/addNode)</li>
+ *   <li>Converter : conversion DTO JSON → Envelope et Envelope → DTO JSON</li>
+ *   <li>CodeMapper : mapping des codes retour Envelope → statuts HTTP</li>
+ *   <li>@EJB injection : appel du SynchroneService existant</li>
  * </ul>
  */
 public class JaxrsProjectGenerator {
 
     private static final Logger log = LoggerFactory.getLogger(JaxrsProjectGenerator.class);
+
+    private static final Pattern GET_NODE_PATTERN = Pattern.compile(
+            "getNodeAs(?:String|Int|Boolean)\\(\"([^\"]+)\"\\)");
+    private static final Pattern WRITE_FLUX_FIELD_PATTERN = Pattern.compile(
+            "ecrireString\\([^,]+,\\s*[^,]+,\\s*\"([^\"]+)\"");
 
     private final String basePackage;
     private final String artifactId;
@@ -41,7 +53,7 @@ public class JaxrsProjectGenerator {
     }
 
     /**
-     * Génère le projet complet dans le répertoire de sortie.
+     * Génère le projet WAR adaptateur complet dans le répertoire de sortie.
      */
     public void generate(List<EjbInfo> ejbs, Path outputDir) throws IOException {
         log.info("Generating JAX-RS project in: {}", outputDir);
@@ -50,146 +62,286 @@ public class JaxrsProjectGenerator {
 
         Files.createDirectories(outputDir);
 
-        // Structure Maven
         Path srcMain = outputDir.resolve("src/main/java/" + basePackage.replace('.', '/'));
         Path srcResources = outputDir.resolve("src/main/resources");
         Path resourceDir = srcMain.resolve("resource");
         Path dtoDir = srcMain.resolve("dto");
+        Path converterDir = srcMain.resolve("converter");
         Path configDir = srcMain.resolve("config");
 
         Files.createDirectories(resourceDir);
         Files.createDirectories(dtoDir);
+        Files.createDirectories(converterDir);
         Files.createDirectories(configDir);
         Files.createDirectories(srcResources);
 
-        // 1. POM (sans jakarta.ejb-api — transformation directe, pas de dépendance EJB)
         generatePom(outputDir);
-
-        // 2. JAX-RS Application config
         generateJaxRsApplication(configDir);
+        generateCodeMapper(configDir);
 
-        // 3. Pour chaque EJB: Resource + DTOs (pas de Service layer)
         for (EjbInfo ejb : ejbs) {
+            Map<String, List<EnvelopeField>> inputFieldsByMethod = new LinkedHashMap<>();
+            Map<String, List<EnvelopeField>> outputFieldsByMethod = new LinkedHashMap<>();
+            extractEnvelopeFields(ejb, inputFieldsByMethod, outputFieldsByMethod);
+
             generateResource(resourceDir, ejb);
-            generateDtos(dtoDir, ejb);
+            generateDtos(dtoDir, ejb, inputFieldsByMethod, outputFieldsByMethod);
+            generateConverter(converterDir, ejb, inputFieldsByMethod, outputFieldsByMethod);
         }
 
-        // 4. beans.xml pour CDI
+        generateErrorResponseDto(dtoDir);
         generateBeansXml(srcResources);
 
         log.info("Project generation complete: {}", outputDir);
     }
 
-    // ===== POM =====
+    // ===== Extraction des champs Envelope =====
+
+    public static class EnvelopeField {
+        private final String path;
+        private final String fieldName;
+        private final String type;
+
+        public EnvelopeField(String path, String fieldName, String type) {
+            this.path = path;
+            this.fieldName = fieldName;
+            this.type = type;
+        }
+
+        public String getPath() { return path; }
+        public String getFieldName() { return fieldName; }
+        public String getType() { return type; }
+    }
+
+    private void extractEnvelopeFields(EjbInfo ejb,
+                                       Map<String, List<EnvelopeField>> inputFields,
+                                       Map<String, List<EnvelopeField>> outputFields) {
+        for (MethodInfo method : ejb.getMethods()) {
+            String body = method.getMethodBody();
+            if (body == null || body.isBlank()) {
+                inputFields.put(method.getName(), parametersToFields(method));
+                List<EnvelopeField> defaultOut = new ArrayList<>();
+                defaultOut.add(new EnvelopeField("flux/code", "code", "String"));
+                defaultOut.add(new EnvelopeField("flux/message", "message", "String"));
+                outputFields.put(method.getName(), defaultOut);
+                continue;
+            }
+
+            // Champs d'entrée
+            Set<String> seenInput = new LinkedHashSet<>();
+            List<EnvelopeField> inFields = new ArrayList<>();
+            Matcher m = GET_NODE_PATTERN.matcher(body);
+            while (m.find()) {
+                String path = m.group(1);
+                if (path.contains(",") || path.equals("flux/action")) continue;
+                String fieldName = extractFieldName(path);
+                if (seenInput.add(fieldName)) {
+                    String type = body.contains("getNodeAsInt(\"" + path + "\")") ? "int" :
+                                  body.contains("getNodeAsBoolean(\"" + path + "\")") ? "boolean" : "String";
+                    inFields.add(new EnvelopeField(path, fieldName, type));
+                }
+            }
+            if (inFields.isEmpty()) {
+                inFields = parametersToFields(method);
+            }
+            inputFields.put(method.getName(), inFields);
+
+            // Champs de sortie
+            Set<String> seenOutput = new LinkedHashSet<>();
+            List<EnvelopeField> outFields = new ArrayList<>();
+            outFields.add(new EnvelopeField("flux/code", "code", "String"));
+            outFields.add(new EnvelopeField("flux/message", "message", "String"));
+            seenOutput.add("code");
+            seenOutput.add("message");
+
+            Matcher wfM = WRITE_FLUX_FIELD_PATTERN.matcher(body);
+            while (wfM.find()) {
+                String fieldName = wfM.group(1);
+                if (seenOutput.add(fieldName)) {
+                    outFields.add(new EnvelopeField("flux/" + fieldName, fieldName, "String"));
+                }
+            }
+            outputFields.put(method.getName(), outFields);
+        }
+    }
+
+    private List<EnvelopeField> parametersToFields(MethodInfo method) {
+        return method.getParameters().stream()
+                .map(p -> new EnvelopeField("flux/" + p.getName(), p.getName(), p.getTypeSimple()))
+                .collect(Collectors.toList());
+    }
+
+    private String extractFieldName(String path) {
+        int lastSlash = path.lastIndexOf('/');
+        return lastSlash >= 0 ? path.substring(lastSlash + 1) : path;
+    }
+
+    // ===== POM (Java EE 7 / WebSphere) =====
 
     private void generatePom(Path outputDir) throws IOException {
-        String pom = """
-                <?xml version="1.0" encoding="UTF-8"?>
-                <project xmlns="http://maven.apache.org/POM/4.0.0"
-                         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
-                    <modelVersion>4.0.0</modelVersion>
-                
-                    <groupId>%s</groupId>
-                    <artifactId>%s</artifactId>
-                    <version>1.0.0-SNAPSHOT</version>
-                    <packaging>war</packaging>
-                
-                    <properties>
-                        <java.version>17</java.version>
-                        <maven.compiler.source>17</maven.compiler.source>
-                        <maven.compiler.target>17</maven.compiler.target>
-                        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-                        <jakarta.ee.version>10.0.0</jakarta.ee.version>
-                    </properties>
-                
-                    <dependencies>
-                        <!-- Jakarta EE API (provided by the app server) -->
-                        <dependency>
-                            <groupId>jakarta.platform</groupId>
-                            <artifactId>jakarta.jakartaee-api</artifactId>
-                            <version>${jakarta.ee.version}</version>
-                            <scope>provided</scope>
-                        </dependency>
-                
-                        <!-- JSON-B for JSON serialization -->
-                        <dependency>
-                            <groupId>jakarta.json.bind</groupId>
-                            <artifactId>jakarta.json.bind-api</artifactId>
-                            <version>3.0.0</version>
-                            <scope>provided</scope>
-                        </dependency>
-                    </dependencies>
-                
-                    <build>
-                        <finalName>${project.artifactId}</finalName>
-                        <plugins>
-                            <plugin>
-                                <groupId>org.apache.maven.plugins</groupId>
-                                <artifactId>maven-compiler-plugin</artifactId>
-                                <version>3.12.1</version>
-                                <configuration>
-                                    <source>${java.version}</source>
-                                    <target>${java.version}</target>
-                                </configuration>
-                            </plugin>
-                            <plugin>
-                                <groupId>org.apache.maven.plugins</groupId>
-                                <artifactId>maven-war-plugin</artifactId>
-                                <version>3.4.0</version>
-                                <configuration>
-                                    <failOnMissingWebXml>false</failOnMissingWebXml>
-                                </configuration>
-                            </plugin>
-                        </plugins>
-                    </build>
-                </project>
-                """.formatted(groupId, artifactId);
+        StringBuilder pom = new StringBuilder();
+        pom.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        pom.append("<project xmlns=\"http://maven.apache.org/POM/4.0.0\"\n");
+        pom.append("         xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n");
+        pom.append("         xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd\">\n");
+        pom.append("    <modelVersion>4.0.0</modelVersion>\n\n");
+        pom.append("    <groupId>").append(groupId).append("</groupId>\n");
+        pom.append("    <artifactId>").append(artifactId).append("</artifactId>\n");
+        pom.append("    <version>1.0.0-SNAPSHOT</version>\n");
+        pom.append("    <packaging>war</packaging>\n\n");
+        pom.append("    <properties>\n");
+        pom.append("        <maven.compiler.source>1.8</maven.compiler.source>\n");
+        pom.append("        <maven.compiler.target>1.8</maven.compiler.target>\n");
+        pom.append("        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>\n");
+        pom.append("    </properties>\n\n");
+        pom.append("    <dependencies>\n");
+        pom.append("        <!-- Java EE 7 API (provided by WebSphere) -->\n");
+        pom.append("        <dependency>\n");
+        pom.append("            <groupId>javax</groupId>\n");
+        pom.append("            <artifactId>javaee-api</artifactId>\n");
+        pom.append("            <version>7.0</version>\n");
+        pom.append("            <scope>provided</scope>\n");
+        pom.append("        </dependency>\n\n");
+        pom.append("        <!-- EAI Commons (Envelope, Parser) - provided by the EAR -->\n");
+        pom.append("        <dependency>\n");
+        pom.append("            <groupId>ma.eai.commons</groupId>\n");
+        pom.append("            <artifactId>eai-commons-services</artifactId>\n");
+        pom.append("            <version>1.0.0</version>\n");
+        pom.append("            <scope>provided</scope>\n");
+        pom.append("        </dependency>\n\n");
+        pom.append("        <!-- EAI Middleware Connectors (SynchroneService) - provided by the EAR -->\n");
+        pom.append("        <dependency>\n");
+        pom.append("            <groupId>ma.eai.midw</groupId>\n");
+        pom.append("            <artifactId>eai-midw-connectors</artifactId>\n");
+        pom.append("            <version>1.0.0</version>\n");
+        pom.append("            <scope>provided</scope>\n");
+        pom.append("        </dependency>\n");
+        pom.append("    </dependencies>\n\n");
+        pom.append("    <build>\n");
+        pom.append("        <finalName>${project.artifactId}</finalName>\n");
+        pom.append("        <plugins>\n");
+        pom.append("            <plugin>\n");
+        pom.append("                <groupId>org.apache.maven.plugins</groupId>\n");
+        pom.append("                <artifactId>maven-compiler-plugin</artifactId>\n");
+        pom.append("                <version>3.12.1</version>\n");
+        pom.append("                <configuration>\n");
+        pom.append("                    <source>1.8</source>\n");
+        pom.append("                    <target>1.8</target>\n");
+        pom.append("                </configuration>\n");
+        pom.append("            </plugin>\n");
+        pom.append("            <plugin>\n");
+        pom.append("                <groupId>org.apache.maven.plugins</groupId>\n");
+        pom.append("                <artifactId>maven-war-plugin</artifactId>\n");
+        pom.append("                <version>3.4.0</version>\n");
+        pom.append("                <configuration>\n");
+        pom.append("                    <failOnMissingWebXml>false</failOnMissingWebXml>\n");
+        pom.append("                </configuration>\n");
+        pom.append("            </plugin>\n");
+        pom.append("        </plugins>\n");
+        pom.append("    </build>\n");
+        pom.append("</project>\n");
 
-        Files.writeString(outputDir.resolve("pom.xml"), pom);
+        Files.writeString(outputDir.resolve("pom.xml"), pom.toString());
     }
 
     // ===== JAX-RS Application =====
 
     private void generateJaxRsApplication(Path configDir) throws IOException {
-        String code = """
-                package %s.config;
-                
-                import jakarta.ws.rs.ApplicationPath;
-                import jakarta.ws.rs.core.Application;
-                
-                /**
-                 * Configuration JAX-RS - point d'entrée de l'API REST.
-                 */
-                @ApplicationPath("/api")
-                public class JaxRsApplication extends Application {
-                }
-                """.formatted(basePackage);
+        StringBuilder sb = new StringBuilder();
+        sb.append("package ").append(basePackage).append(".config;\n\n");
+        sb.append("import javax.ws.rs.ApplicationPath;\n");
+        sb.append("import javax.ws.rs.core.Application;\n\n");
+        sb.append("/**\n");
+        sb.append(" * Configuration JAX-RS — point d'entrée de l'API REST.\n");
+        sb.append(" * Ce module WAR est déployé dans le même EAR que l'EJB sur WebSphere.\n");
+        sb.append(" */\n");
+        sb.append("@ApplicationPath(\"/api\")\n");
+        sb.append("public class JaxRsApplication extends Application {\n");
+        sb.append("}\n");
 
-        Files.writeString(configDir.resolve("JaxRsApplication.java"), code);
+        Files.writeString(configDir.resolve("JaxRsApplication.java"), sb.toString());
     }
 
-    // ===== Resource (Endpoint JAX-RS avec logique métier directe) =====
+    // ===== CodeMapper =====
+
+    private void generateCodeMapper(Path configDir) throws IOException {
+        StringBuilder sb = new StringBuilder();
+        sb.append("package ").append(basePackage).append(".config;\n\n");
+        sb.append("import javax.ws.rs.core.Response;\n");
+        sb.append("import java.util.HashMap;\n");
+        sb.append("import java.util.Map;\n\n");
+        sb.append("/**\n");
+        sb.append(" * Mapping des codes retour Envelope vers les statuts HTTP.\n");
+        sb.append(" * <p>\n");
+        sb.append(" * Convention :\n");
+        sb.append(" * <ul>\n");
+        sb.append(" *   <li>\"000\" = 200 OK (succès)</li>\n");
+        sb.append(" *   <li>\"001\", \"002\", \"005\" = 409 Conflict (erreur métier)</li>\n");
+        sb.append(" *   <li>\"333\", \"444\" = 400 Bad Request (validation)</li>\n");
+        sb.append(" *   <li>\"003\", \"004\", \"009\" = 500 Internal Server Error (technique)</li>\n");
+        sb.append(" * </ul>\n");
+        sb.append(" */\n");
+        sb.append("public final class CodeMapper {\n\n");
+        sb.append("    private static final Map<String, Response.Status> CODE_MAP = new HashMap<String, Response.Status>();\n\n");
+        sb.append("    static {\n");
+        sb.append("        CODE_MAP.put(\"000\", Response.Status.OK);\n");
+        sb.append("        CODE_MAP.put(\"001\", Response.Status.CONFLICT);\n");
+        sb.append("        CODE_MAP.put(\"002\", Response.Status.CONFLICT);\n");
+        sb.append("        CODE_MAP.put(\"003\", Response.Status.INTERNAL_SERVER_ERROR);\n");
+        sb.append("        CODE_MAP.put(\"004\", Response.Status.INTERNAL_SERVER_ERROR);\n");
+        sb.append("        CODE_MAP.put(\"005\", Response.Status.FORBIDDEN);\n");
+        sb.append("        CODE_MAP.put(\"009\", Response.Status.INTERNAL_SERVER_ERROR);\n");
+        sb.append("        CODE_MAP.put(\"333\", Response.Status.BAD_REQUEST);\n");
+        sb.append("        CODE_MAP.put(\"444\", Response.Status.BAD_REQUEST);\n");
+        sb.append("    }\n\n");
+        sb.append("    private CodeMapper() {}\n\n");
+        sb.append("    /**\n");
+        sb.append("     * Mappe un code retour Envelope vers un statut HTTP.\n");
+        sb.append("     */\n");
+        sb.append("    public static Response.Status toHttpStatus(String code) {\n");
+        sb.append("        if (code == null || code.trim().isEmpty()) {\n");
+        sb.append("            return Response.Status.INTERNAL_SERVER_ERROR;\n");
+        sb.append("        }\n");
+        sb.append("        Response.Status status = CODE_MAP.get(code);\n");
+        sb.append("        return status != null ? status : Response.Status.INTERNAL_SERVER_ERROR;\n");
+        sb.append("    }\n\n");
+        sb.append("    /**\n");
+        sb.append("     * Vérifie si le code indique un succès.\n");
+        sb.append("     */\n");
+        sb.append("    public static boolean isSuccess(String code) {\n");
+        sb.append("        return \"000\".equals(code);\n");
+        sb.append("    }\n");
+        sb.append("}\n");
+
+        Files.writeString(configDir.resolve("CodeMapper.java"), sb.toString());
+    }
+
+    // ===== Resource (Endpoint JAX-RS — adaptateur pur) =====
 
     private void generateResource(Path resourceDir, EjbInfo ejb) throws IOException {
         String resourceName = capitalize(ejb.deriveResourceName().replace("-", "")) + "Resource";
+        String converterName = capitalize(ejb.deriveResourceName().replace("-", "")) + "Converter";
         String path = "/" + ejb.deriveResourceName();
 
         StringBuilder sb = new StringBuilder();
         sb.append("package ").append(basePackage).append(".resource;\n\n");
 
-        // Imports
-        sb.append("import jakarta.enterprise.context.ApplicationScoped;\n");
-        sb.append("import jakarta.ws.rs.*;\n");
-        sb.append("import jakarta.ws.rs.core.MediaType;\n");
-        sb.append("import jakarta.ws.rs.core.Response;\n");
+        // Imports (javax.* pour Java EE 7 / WebSphere)
+        sb.append("import javax.ejb.EJB;\n");
+        sb.append("import javax.enterprise.context.ApplicationScoped;\n");
+        sb.append("import javax.ws.rs.*;\n");
+        sb.append("import javax.ws.rs.core.MediaType;\n");
+        sb.append("import javax.ws.rs.core.Response;\n");
+        sb.append("import ma.eai.commons.services.parsing.Envelope;\n");
+        sb.append("import ma.eai.midw.connectors.SynchroneService;\n");
+        sb.append("import ").append(basePackage).append(".config.CodeMapper;\n");
+        sb.append("import ").append(basePackage).append(".converter.").append(converterName).append(";\n");
         sb.append("import ").append(basePackage).append(".dto.*;\n");
         sb.append("\n");
 
-        // Class
         sb.append("/**\n");
-        sb.append(" * Resource JAX-RS — transformation directe de ").append(ejb.getInterfaceName()).append(".\n");
-        sb.append(" * Le code métier est adapté directement dans cette classe.\n");
+        sb.append(" * Resource JAX-RS — adaptateur REST pour ").append(ejb.getInterfaceName()).append(".\n");
+        sb.append(" * Déployé dans le même EAR que l'EJB sur WebSphere.\n");
         sb.append(" */\n");
         sb.append("@Path(\"").append(path).append("\")\n");
         sb.append("@Produces(MediaType.APPLICATION_JSON)\n");
@@ -197,7 +349,13 @@ public class JaxrsProjectGenerator {
         sb.append("@ApplicationScoped\n");
         sb.append("public class ").append(resourceName).append(" {\n\n");
 
-        // Méthodes
+        // @EJB injection (WebSphere compatible)
+        String ejbName = ejb.getJndiName() != null ? ejb.getJndiName() : ejb.getImplementationName();
+        sb.append("    @EJB(lookup = \"java:app/").append(ejbName).append("\")\n");
+        sb.append("    private SynchroneService ejbService;\n\n");
+
+        sb.append("    private final ").append(converterName).append(" converter = new ").append(converterName).append("();\n\n");
+
         for (MethodInfo method : ejb.getMethods()) {
             generateResourceMethod(sb, method, ejb);
         }
@@ -209,191 +367,321 @@ public class JaxrsProjectGenerator {
     }
 
     private void generateResourceMethod(StringBuilder sb, MethodInfo method, EjbInfo ejb) {
-        String httpAnnotation = "@" + method.getHttpMethod().name();
+        MethodInfo.HttpMethod httpMethod = method.getHttpMethod() != null ? method.getHttpMethod() : method.inferHttpMethod();
+        String httpAnnotation = "@" + httpMethod.name();
         String methodPath = "/" + camelToKebab(method.getName());
         String dtoPrefix = capitalize(method.getName());
+        String requestDtoName = dtoPrefix + "Request";
+        String responseDtoName = dtoPrefix + "Response";
 
         sb.append("    ").append(httpAnnotation).append("\n");
         sb.append("    @Path(\"").append(methodPath).append("\")\n");
 
-        // Signature de la méthode
-        if (method.needsRequestDto()) {
-            String requestDtoName = dtoPrefix + "Request";
-            sb.append("    public Response ").append(method.getName())
-                    .append("(").append(requestDtoName).append(" request) {\n");
-        } else if (!method.getParameters().isEmpty()) {
-            ParameterInfo param = method.getParameters().get(0);
-            if (method.getHttpMethod() == MethodInfo.HttpMethod.GET) {
+        // Signature
+        if (httpMethod == MethodInfo.HttpMethod.GET && method.getParameters().size() <= 1) {
+            if (!method.getParameters().isEmpty()) {
+                ParameterInfo param = method.getParameters().get(0);
                 sb.append("    public Response ").append(method.getName())
                         .append("(@QueryParam(\"").append(param.getName()).append("\") ")
                         .append(param.getTypeSimple()).append(" ").append(param.getName()).append(") {\n");
             } else {
-                String requestDtoName = dtoPrefix + "Request";
-                sb.append("    public Response ").append(method.getName())
-                        .append("(").append(requestDtoName).append(" request) {\n");
+                sb.append("    public Response ").append(method.getName()).append("() {\n");
             }
         } else {
-            sb.append("    public Response ").append(method.getName()).append("() {\n");
+            sb.append("    public Response ").append(method.getName())
+                    .append("(").append(requestDtoName).append(" request) {\n");
         }
 
-        // Corps de la méthode
-        if (method.hasMethodBody()) {
-            // Le corps métier extrait de l'implémentation EJB est injecté directement
-            sb.append("        // --- Logique métier transformée depuis ").append(ejb.getInterfaceName()).append(" ---\n");
-            sb.append("        try {\n");
-            String transformedBody = transformMethodBody(method);
-            sb.append(indentBody(transformedBody, 12));
-            sb.append("\n");
+        // Corps — pattern adaptateur
+        sb.append("        try {\n");
+        sb.append("            // 1. Convertir le DTO JSON en Envelope XML\n");
 
-            if ("void".equals(method.getReturnType())) {
-                sb.append("            return Response.noContent().build();\n");
+        if (httpMethod == MethodInfo.HttpMethod.GET && method.getParameters().size() <= 1) {
+            if (!method.getParameters().isEmpty()) {
+                ParameterInfo param = method.getParameters().get(0);
+                sb.append("            Envelope envelopeIn = converter.toEnvelope").append(dtoPrefix).append("(").append(param.getName()).append(");\n");
             } else {
-                sb.append("            // TODO: le return original a été conservé — adapter si nécessaire\n");
-                sb.append("            // return Response.ok(result).build();\n");
+                sb.append("            Envelope envelopeIn = converter.toEnvelope").append(dtoPrefix).append("();\n");
             }
-            sb.append("        } catch (Exception e) {\n");
-            sb.append("            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)\n");
-            sb.append("                    .entity(new ErrorResponse(e.getMessage()))\n");
-            sb.append("                    .build();\n");
-            sb.append("        }\n");
         } else {
-            // Pas de corps disponible → stub TODO
-            sb.append("        try {\n");
-            sb.append("            // TODO: implémenter la logique métier (transformée depuis l'EJB)\n");
-
-            if ("void".equals(method.getReturnType())) {
-                sb.append("            return Response.noContent().build();\n");
-            } else {
-                sb.append("            // TODO: retourner le résultat métier\n");
-                sb.append("            return Response.ok().build();\n");
-            }
-
-            sb.append("        } catch (Exception e) {\n");
-            sb.append("            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)\n");
-            sb.append("                    .entity(new ErrorResponse(e.getMessage()))\n");
-            sb.append("                    .build();\n");
-            sb.append("        }\n");
+            sb.append("            Envelope envelopeIn = converter.toEnvelope").append(dtoPrefix).append("(request);\n");
         }
+
+        sb.append("\n");
+        sb.append("            // 2. Appeler le service EJB\n");
+        sb.append("            Envelope envelopeOut = ejbService.process(envelopeIn);\n");
+        sb.append("\n");
+        sb.append("            // 3. Extraire le code retour et mapper vers HTTP status\n");
+        sb.append("            String code = envelopeOut.getNodeAsString(\"flux/code\");\n");
+        sb.append("            String message = envelopeOut.getNodeAsString(\"flux/message\");\n");
+        sb.append("\n");
+        sb.append("            if (!CodeMapper.isSuccess(code)) {\n");
+        sb.append("                return Response.status(CodeMapper.toHttpStatus(code))\n");
+        sb.append("                        .entity(new ErrorResponse(code, message))\n");
+        sb.append("                        .build();\n");
+        sb.append("            }\n");
+        sb.append("\n");
+        sb.append("            // 4. Convertir la réponse Envelope en DTO JSON\n");
+        sb.append("            ").append(responseDtoName).append(" response = converter.from").append(dtoPrefix).append("Envelope(envelopeOut);\n");
+        sb.append("            return Response.ok(response).build();\n");
+        sb.append("\n");
+        sb.append("        } catch (Exception e) {\n");
+        sb.append("            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)\n");
+        sb.append("                    .entity(new ErrorResponse(\"500\", e.getMessage()))\n");
+        sb.append("                    .build();\n");
+        sb.append("        }\n");
 
         sb.append("    }\n\n");
     }
 
     // ===== DTOs =====
 
-    private void generateDtos(Path dtoDir, EjbInfo ejb) throws IOException {
+    private void generateDtos(Path dtoDir, EjbInfo ejb,
+                              Map<String, List<EnvelopeField>> inputFields,
+                              Map<String, List<EnvelopeField>> outputFields) throws IOException {
         for (MethodInfo method : ejb.getMethods()) {
             String dtoPrefix = capitalize(method.getName());
+            List<EnvelopeField> inFields = inputFields.getOrDefault(method.getName(), Collections.emptyList());
+            List<EnvelopeField> outFields = outputFields.getOrDefault(method.getName(), Collections.emptyList());
 
-            // Request DTO
-            if (method.needsRequestDto() ||
-                    (!method.getParameters().isEmpty() && method.getHttpMethod() != MethodInfo.HttpMethod.GET)) {
-                generateRequestDto(dtoDir, dtoPrefix, method);
-            }
-
-            // Response DTO (si retour complexe)
-            if (method.needsResponseDto()) {
-                generateResponseDto(dtoDir, dtoPrefix, method);
-            }
+            generateRequestDto(dtoDir, dtoPrefix, method, inFields);
+            generateResponseDto(dtoDir, dtoPrefix, outFields);
         }
-
-        // ErrorResponse DTO (toujours généré)
-        generateErrorResponseDto(dtoDir);
     }
 
-    private void generateRequestDto(Path dtoDir, String prefix, MethodInfo method) throws IOException {
+    private void generateRequestDto(Path dtoDir, String prefix, MethodInfo method,
+                                    List<EnvelopeField> fields) throws IOException {
         String className = prefix + "Request";
         StringBuilder sb = new StringBuilder();
         sb.append("package ").append(basePackage).append(".dto;\n\n");
+        sb.append("import java.io.Serializable;\n\n");
         sb.append("/**\n");
         sb.append(" * DTO Request pour ").append(method.getName()).append(".\n");
+        sb.append(" * Champs issus de l'analyse des flux Envelope.\n");
         sb.append(" */\n");
-        sb.append("public class ").append(className).append(" {\n\n");
+        sb.append("public class ").append(className).append(" implements Serializable {\n\n");
+        sb.append("    private static final long serialVersionUID = 1L;\n\n");
 
-        for (ParameterInfo param : method.getParameters()) {
-            sb.append("    private ").append(param.getTypeSimple()).append(" ").append(param.getName()).append(";\n");
+        for (EnvelopeField field : fields) {
+            sb.append("    private ").append(javaType(field.getType())).append(" ").append(field.getFieldName()).append(";\n");
         }
         sb.append("\n");
 
-        // Constructeur vide
-        sb.append("    public ").append(className).append("() {}\n\n");
+        sb.append("    public ").append(className).append("() {\n");
+        sb.append("    }\n\n");
 
-        // Getters/Setters
-        for (ParameterInfo param : method.getParameters()) {
-            String cap = capitalize(param.getName());
-            sb.append("    public ").append(param.getTypeSimple()).append(" get").append(cap).append("() { return ").append(param.getName()).append("; }\n");
-            sb.append("    public void set").append(cap).append("(").append(param.getTypeSimple()).append(" ").append(param.getName()).append(") { this.").append(param.getName()).append(" = ").append(param.getName()).append("; }\n\n");
+        for (EnvelopeField field : fields) {
+            String cap = capitalize(field.getFieldName());
+            String jType = javaType(field.getType());
+            sb.append("    public ").append(jType).append(" get").append(cap).append("() {\n");
+            sb.append("        return ").append(field.getFieldName()).append(";\n");
+            sb.append("    }\n\n");
+            sb.append("    public void set").append(cap).append("(").append(jType).append(" ").append(field.getFieldName()).append(") {\n");
+            sb.append("        this.").append(field.getFieldName()).append(" = ").append(field.getFieldName()).append(";\n");
+            sb.append("    }\n\n");
         }
 
         sb.append("}\n");
         Files.writeString(dtoDir.resolve(className + ".java"), sb.toString());
     }
 
-    private void generateResponseDto(Path dtoDir, String prefix, MethodInfo method) throws IOException {
+    private void generateResponseDto(Path dtoDir, String prefix,
+                                     List<EnvelopeField> fields) throws IOException {
         String className = prefix + "Response";
         StringBuilder sb = new StringBuilder();
         sb.append("package ").append(basePackage).append(".dto;\n\n");
+        sb.append("import java.io.Serializable;\n\n");
         sb.append("/**\n");
-        sb.append(" * DTO Response pour ").append(method.getName()).append(".\n");
+        sb.append(" * DTO Response pour ").append(prefix).append(".\n");
+        sb.append(" * Champs issus de l'analyse des flux Envelope de sortie.\n");
         sb.append(" */\n");
-        sb.append("public class ").append(className).append(" {\n\n");
-        sb.append("    private ").append(method.getReturnTypeSimple()).append(" data;\n\n");
-        sb.append("    public ").append(className).append("() {}\n\n");
-        sb.append("    public ").append(className).append("(").append(method.getReturnTypeSimple()).append(" data) {\n");
-        sb.append("        this.data = data;\n");
+        sb.append("public class ").append(className).append(" implements Serializable {\n\n");
+        sb.append("    private static final long serialVersionUID = 1L;\n\n");
+
+        for (EnvelopeField field : fields) {
+            sb.append("    private ").append(javaType(field.getType())).append(" ").append(field.getFieldName()).append(";\n");
+        }
+        sb.append("\n");
+
+        sb.append("    public ").append(className).append("() {\n");
         sb.append("    }\n\n");
-        sb.append("    public ").append(method.getReturnTypeSimple()).append(" getData() { return data; }\n");
-        sb.append("    public void setData(").append(method.getReturnTypeSimple()).append(" data) { this.data = data; }\n");
+
+        for (EnvelopeField field : fields) {
+            String cap = capitalize(field.getFieldName());
+            String jType = javaType(field.getType());
+            sb.append("    public ").append(jType).append(" get").append(cap).append("() {\n");
+            sb.append("        return ").append(field.getFieldName()).append(";\n");
+            sb.append("    }\n\n");
+            sb.append("    public void set").append(cap).append("(").append(jType).append(" ").append(field.getFieldName()).append(") {\n");
+            sb.append("        this.").append(field.getFieldName()).append(" = ").append(field.getFieldName()).append(";\n");
+            sb.append("    }\n\n");
+        }
+
         sb.append("}\n");
         Files.writeString(dtoDir.resolve(className + ".java"), sb.toString());
     }
 
     private void generateErrorResponseDto(Path dtoDir) throws IOException {
-        String code = """
-                package %s.dto;
-                
-                /**
-                 * DTO standard pour les réponses d'erreur.
-                 */
-                public class ErrorResponse {
-                
-                    private String message;
-                    private long timestamp;
-                
-                    public ErrorResponse() {
-                        this.timestamp = System.currentTimeMillis();
-                    }
-                
-                    public ErrorResponse(String message) {
-                        this();
-                        this.message = message;
-                    }
-                
-                    public String getMessage() { return message; }
-                    public void setMessage(String message) { this.message = message; }
-                
-                    public long getTimestamp() { return timestamp; }
-                    public void setTimestamp(long timestamp) { this.timestamp = timestamp; }
+        StringBuilder sb = new StringBuilder();
+        sb.append("package ").append(basePackage).append(".dto;\n\n");
+        sb.append("import java.io.Serializable;\n\n");
+        sb.append("/**\n");
+        sb.append(" * DTO standard pour les réponses d'erreur.\n");
+        sb.append(" */\n");
+        sb.append("public class ErrorResponse implements Serializable {\n\n");
+        sb.append("    private static final long serialVersionUID = 1L;\n\n");
+        sb.append("    private String code;\n");
+        sb.append("    private String message;\n");
+        sb.append("    private long timestamp;\n\n");
+        sb.append("    public ErrorResponse() {\n");
+        sb.append("        this.timestamp = System.currentTimeMillis();\n");
+        sb.append("    }\n\n");
+        sb.append("    public ErrorResponse(String code, String message) {\n");
+        sb.append("        this();\n");
+        sb.append("        this.code = code;\n");
+        sb.append("        this.message = message;\n");
+        sb.append("    }\n\n");
+        sb.append("    public String getCode() {\n");
+        sb.append("        return code;\n");
+        sb.append("    }\n\n");
+        sb.append("    public void setCode(String code) {\n");
+        sb.append("        this.code = code;\n");
+        sb.append("    }\n\n");
+        sb.append("    public String getMessage() {\n");
+        sb.append("        return message;\n");
+        sb.append("    }\n\n");
+        sb.append("    public void setMessage(String message) {\n");
+        sb.append("        this.message = message;\n");
+        sb.append("    }\n\n");
+        sb.append("    public long getTimestamp() {\n");
+        sb.append("        return timestamp;\n");
+        sb.append("    }\n\n");
+        sb.append("    public void setTimestamp(long timestamp) {\n");
+        sb.append("        this.timestamp = timestamp;\n");
+        sb.append("    }\n");
+        sb.append("}\n");
+
+        Files.writeString(dtoDir.resolve("ErrorResponse.java"), sb.toString());
+    }
+
+    // ===== Converter (JSON ↔ Envelope) =====
+
+    private void generateConverter(Path converterDir, EjbInfo ejb,
+                                   Map<String, List<EnvelopeField>> inputFields,
+                                   Map<String, List<EnvelopeField>> outputFields) throws IOException {
+        String converterName = capitalize(ejb.deriveResourceName().replace("-", "")) + "Converter";
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("package ").append(basePackage).append(".converter;\n\n");
+        sb.append("import ma.eai.commons.services.parsing.Envelope;\n");
+        sb.append("import ").append(basePackage).append(".dto.*;\n\n");
+        sb.append("/**\n");
+        sb.append(" * Converter bidirectionnel JSON DTO <-> Envelope pour ").append(ejb.getInterfaceName()).append(".\n");
+        sb.append(" * Assure la conversion :\n");
+        sb.append(" *   DTO Request -> Envelope (addNode pour chaque champ)\n");
+        sb.append(" *   Envelope -> DTO Response (getNodeAsString pour chaque champ)\n");
+        sb.append(" */\n");
+        sb.append("public class ").append(converterName).append(" {\n\n");
+
+        for (MethodInfo method : ejb.getMethods()) {
+            String dtoPrefix = capitalize(method.getName());
+            List<EnvelopeField> inFields = inputFields.getOrDefault(method.getName(), Collections.emptyList());
+            List<EnvelopeField> outFields = outputFields.getOrDefault(method.getName(), Collections.emptyList());
+
+            generateToEnvelopeMethod(sb, method, dtoPrefix, inFields);
+            generateFromEnvelopeMethod(sb, dtoPrefix, outFields);
+        }
+
+        sb.append("}\n");
+
+        Files.writeString(converterDir.resolve(converterName + ".java"), sb.toString());
+    }
+
+    private void generateToEnvelopeMethod(StringBuilder sb, MethodInfo method,
+                                          String dtoPrefix, List<EnvelopeField> fields) {
+        String requestDtoName = dtoPrefix + "Request";
+        String actionName = method.getName();
+        MethodInfo.HttpMethod httpMethod = method.getHttpMethod() != null ? method.getHttpMethod() : method.inferHttpMethod();
+
+        if (httpMethod == MethodInfo.HttpMethod.GET && method.getParameters().size() <= 1) {
+            if (!method.getParameters().isEmpty()) {
+                ParameterInfo param = method.getParameters().get(0);
+                sb.append("    /**\n");
+                sb.append("     * Convertit le paramètre en Envelope pour l'action '").append(actionName).append("'.\n");
+                sb.append("     */\n");
+                sb.append("    public Envelope toEnvelope").append(dtoPrefix).append("(")
+                        .append(param.getTypeSimple()).append(" ").append(param.getName()).append(") {\n");
+                sb.append("        Envelope envelope = new Envelope();\n");
+                sb.append("        envelope.addNode(\"flux/action\", \"").append(actionName).append("\");\n");
+                sb.append("        envelope.addNode(\"flux/").append(param.getName()).append("\", String.valueOf(").append(param.getName()).append("));\n");
+                sb.append("        return envelope;\n");
+                sb.append("    }\n\n");
+            } else {
+                sb.append("    /**\n");
+                sb.append("     * Crée un Envelope pour l'action '").append(actionName).append("' (sans paramètres).\n");
+                sb.append("     */\n");
+                sb.append("    public Envelope toEnvelope").append(dtoPrefix).append("() {\n");
+                sb.append("        Envelope envelope = new Envelope();\n");
+                sb.append("        envelope.addNode(\"flux/action\", \"").append(actionName).append("\");\n");
+                sb.append("        return envelope;\n");
+                sb.append("    }\n\n");
+            }
+        } else {
+            sb.append("    /**\n");
+            sb.append("     * Convertit le DTO ").append(requestDtoName).append(" en Envelope pour l'action '").append(actionName).append("'.\n");
+            sb.append("     */\n");
+            sb.append("    public Envelope toEnvelope").append(dtoPrefix).append("(").append(requestDtoName).append(" request) {\n");
+            sb.append("        Envelope envelope = new Envelope();\n");
+            sb.append("        envelope.addNode(\"flux/action\", \"").append(actionName).append("\");\n");
+            for (EnvelopeField field : fields) {
+                String getter = "request.get" + capitalize(field.getFieldName()) + "()";
+                if ("int".equals(field.getType()) || "boolean".equals(field.getType())) {
+                    sb.append("        envelope.addNode(\"").append(field.getPath()).append("\", String.valueOf(").append(getter).append("));\n");
+                } else {
+                    sb.append("        envelope.addNode(\"").append(field.getPath()).append("\", ").append(getter).append(");\n");
                 }
-                """.formatted(basePackage);
-        Files.writeString(dtoDir.resolve("ErrorResponse.java"), code);
+            }
+            sb.append("        return envelope;\n");
+            sb.append("    }\n\n");
+        }
+    }
+
+    private void generateFromEnvelopeMethod(StringBuilder sb, String dtoPrefix,
+                                            List<EnvelopeField> fields) {
+        String responseDtoName = dtoPrefix + "Response";
+
+        sb.append("    /**\n");
+        sb.append("     * Convertit l'Envelope de réponse en DTO ").append(responseDtoName).append(".\n");
+        sb.append("     */\n");
+        sb.append("    public ").append(responseDtoName).append(" from").append(dtoPrefix).append("Envelope(Envelope envelope) {\n");
+        sb.append("        ").append(responseDtoName).append(" response = new ").append(responseDtoName).append("();\n");
+        for (EnvelopeField field : fields) {
+            String setter = "response.set" + capitalize(field.getFieldName());
+            if ("int".equals(field.getType())) {
+                sb.append("        ").append(setter).append("(envelope.getNodeAsInt(\"").append(field.getPath()).append("\"));\n");
+            } else {
+                sb.append("        ").append(setter).append("(envelope.getNodeAsString(\"").append(field.getPath()).append("\"));\n");
+            }
+        }
+        sb.append("        return response;\n");
+        sb.append("    }\n\n");
     }
 
     // ===== beans.xml =====
 
     private void generateBeansXml(Path resourcesDir) throws IOException {
-        String beansXml = """
-                <?xml version="1.0" encoding="UTF-8"?>
-                <beans xmlns="https://jakarta.ee/xml/ns/jakartaee"
-                       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                       xsi:schemaLocation="https://jakarta.ee/xml/ns/jakartaee
-                           https://jakarta.ee/xml/ns/jakartaee/beans_4_0.xsd"
-                       bean-discovery-mode="all"
-                       version="4.0">
-                </beans>
-                """;
+        StringBuilder sb = new StringBuilder();
+        sb.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        sb.append("<beans xmlns=\"http://xmlns.jcp.org/xml/ns/javaee\"\n");
+        sb.append("       xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n");
+        sb.append("       xsi:schemaLocation=\"http://xmlns.jcp.org/xml/ns/javaee\n");
+        sb.append("           http://xmlns.jcp.org/xml/ns/javaee/beans_1_1.xsd\"\n");
+        sb.append("       bean-discovery-mode=\"all\">\n");
+        sb.append("</beans>\n");
+
         Path metaInf = resourcesDir.resolve("META-INF");
         Files.createDirectories(metaInf);
-        Files.writeString(metaInf.resolve("beans.xml"), beansXml);
+        Files.writeString(metaInf.resolve("beans.xml"), sb.toString());
     }
 
     // ===== Utilitaires =====
@@ -415,47 +703,14 @@ public class JaxrsProjectGenerator {
         return sb.toString();
     }
 
-    /**
-     * Transforme le corps de la méthode pour l'adapter au contexte JAX-RS.
-     * - Remplace les return d'objets métier par des Response.ok(result).build()
-     * - Conserve le corps tel quel sinon
-     */
-    private String transformMethodBody(MethodInfo method) {
-        String body = method.getMethodBody();
-        if (body == null || body.isBlank()) return body;
-
-        // Pour les méthodes non-void, transformer les return statements
-        if (!"void".equals(method.getReturnType())) {
-            // Remplacer les patterns "return xxx;" par "var result = xxx; return Response.ok(result).build();"
-            // Mais seulement les return simples en fin de bloc
-            // Pour l'instant, on conserve le corps tel quel pour ne pas casser la logique
+    private String javaType(String type) {
+        if (type == null) return "String";
+        switch (type) {
+            case "int": return "int";
+            case "boolean": return "boolean";
+            case "double": return "double";
+            case "long": return "long";
+            default: return "String";
         }
-        return body;
-    }
-
-    /**
-     * Indente le corps d'une méthode extraite pour l'insérer dans la Resource.
-     * Supprime les accolades ouvrantes/fermantes du bloc et ré-indente.
-     */
-    private String indentBody(String body, int spaces) {
-        if (body == null || body.isBlank()) return "";
-
-        String trimmed = body.strip();
-        // Retirer les { } englobantes du bloc
-        if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-            trimmed = trimmed.substring(1, trimmed.length() - 1).strip();
-        }
-
-        String indent = " ".repeat(spaces);
-        StringBuilder result = new StringBuilder();
-        for (String line : trimmed.split("\\R")) {
-            String stripped = line.stripLeading();
-            if (!stripped.isEmpty()) {
-                result.append(indent).append(stripped).append("\n");
-            } else {
-                result.append("\n");
-            }
-        }
-        return result.toString();
     }
 }

@@ -86,8 +86,9 @@ class FullAuditTest {
         assertTrue(Files.exists(genDir.resolve("pom.xml")), name + ": POM manquant");
 
         String pom = Files.readString(genDir.resolve("pom.xml"));
-        assertFalse(pom.contains("jakarta.ejb-api"), name + ": POM ne doit PAS contenir jakarta.ejb-api");
-        assertTrue(pom.contains("jakarta.jakartaee-api"), name + ": POM doit contenir jakarta.jakartaee-api");
+        assertTrue(pom.contains("javaee-api"), name + ": POM doit contenir javaee-api (Java EE 7)");
+        assertFalse(pom.contains("jakarta"), name + ": POM ne doit PAS contenir jakarta (Java EE 7 = javax)");
+        assertTrue(pom.contains("<source>1.8</source>"), name + ": POM doit cibler Java 1.8");
 
         Path resourceDir = genDir.resolve("src/main/java/ma/eai/boa/xbanking/resource");
         assertTrue(Files.exists(resourceDir), name + ": répertoire resource/ manquant");
@@ -98,19 +99,19 @@ class FullAuditTest {
         Path serviceDir = genDir.resolve("src/main/java/ma/eai/boa/xbanking/service");
         assertFalse(Files.exists(serviceDir), name + ": service/ ne doit PAS exister");
 
-        // Vérifier contenu des Resources
+        // Vérifier contenu des Resources (pattern adaptateur WAR)
         for (Path resFile : Files.list(resourceDir).toList()) {
             String content = Files.readString(resFile);
             assertFalse(content.contains("InitialContext"), name + "/" + resFile.getFileName() + ": JNDI interdit");
             assertFalse(content.contains("lookupEjb"), name + "/" + resFile.getFileName() + ": lookupEjb interdit");
-            assertFalse(content.contains("@Inject"), name + "/" + resFile.getFileName() + ": @Inject interdit");
+            assertTrue(content.contains("@EJB"), name + "/" + resFile.getFileName() + ": @EJB manquant");
+            assertTrue(content.contains("SynchroneService"), name + "/" + resFile.getFileName() + ": SynchroneService manquant");
             assertTrue(content.contains("@Path("), name + "/" + resFile.getFileName() + ": @Path manquant");
             assertTrue(content.contains("@ApplicationScoped"), name + "/" + resFile.getFileName() + ": @ApplicationScoped manquant");
             assertTrue(content.contains("@Produces(MediaType.APPLICATION_JSON)"), name + "/" + resFile.getFileName() + ": @Produces manquant");
-
-            boolean hasBody = content.contains("Logique métier transformée");
-            boolean hasTodo = content.contains("TODO: implémenter la logique métier");
-            assertTrue(hasBody || hasTodo, name + "/" + resFile.getFileName() + ": ni logique métier ni TODO");
+            assertTrue(content.contains("CodeMapper.isSuccess"), name + "/" + resFile.getFileName() + ": CodeMapper manquant");
+            assertTrue(content.contains("converter.toEnvelope"), name + "/" + resFile.getFileName() + ": converter.toEnvelope manquant");
+            assertFalse(content.contains("jakarta"), name + "/" + resFile.getFileName() + ": jakarta interdit (Java EE 7)");
         }
 
         // Vérifier DTOs

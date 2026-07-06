@@ -69,7 +69,8 @@ public class MethodInfo {
         String lower = name.toLowerCase();
         if (lower.startsWith("get") || lower.startsWith("find") || lower.startsWith("search")
                 || lower.startsWith("list") || lower.startsWith("read") || lower.startsWith("fetch")
-                || lower.startsWith("consulter") || lower.startsWith("lire") || lower.startsWith("rechercher")) {
+                || lower.startsWith("consulter") || lower.startsWith("lire") || lower.startsWith("rechercher")
+                || lower.startsWith("suivi") || lower.startsWith("consultation")) {
             return HttpMethod.GET;
         }
         if (lower.startsWith("update") || lower.startsWith("modify") || lower.startsWith("edit")

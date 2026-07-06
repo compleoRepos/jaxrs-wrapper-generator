@@ -1,6 +1,7 @@
 package com.bank.tools.jaxrs.model;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -56,7 +57,7 @@ public class EjbInfo {
     public String deriveResourceName() {
         String name = interfaceName;
         // Retirer les suffixes courants
-        for (String suffix : List.of("Service", "Remote", "Local", "Bean", "EJB", "Facade", "WS", "WebService")) {
+        for (String suffix : Arrays.asList("Service", "Remote", "Local", "Bean", "EJB", "Facade", "WS", "WebService")) {
             if (name.endsWith(suffix)) {
                 name = name.substring(0, name.length() - suffix.length());
                 break;
