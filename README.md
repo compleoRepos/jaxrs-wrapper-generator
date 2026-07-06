@@ -4,6 +4,8 @@ Module Maven indépendant qui prend un projet EJB ou JAX-WS (SOAP) en entrée (`
 
 **Approche : transformation directe** — le code métier est adapté directement dans les endpoints REST. Pas de proxy JNDI, pas de couche Service intermédiaire, pas de dépendance EJB dans le projet généré.
 
+> **Documentation complète** : voir [docs/INSTALL.md](docs/INSTALL.md) pour le guide d'installation et d'utilisation détaillé.
+
 ## Types de projets supportés
 
 | Type source | Annotations détectées | Résultat |
@@ -12,6 +14,44 @@ Module Maven indépendant qui prend un projet EJB ou JAX-WS (SOAP) en entrée (`
 | EJB sans interface | `@Stateless` seul (classe directe) | Resource JAX-RS avec corps métier |
 | JAX-WS SOAP | `@WebService` + `@WebMethod` | Resource JAX-RS avec corps métier |
 | Spring Boot REST | `@RestController` | **Ignoré** (déjà REST) |
+
+## Démarrage rapide
+
+```bash
+# 1. Cloner et compiler
+git clone https://github.com/compleoRepos/jaxrs-wrapper-generator.git
+cd jaxrs-wrapper-generator
+mvn clean package
+
+# 2. Transformer un projet EJB
+java -jar target/jaxrs-wrapper-generator-1.0.0-SNAPSHOT.jar \
+  /chemin/vers/projet-ejb.zip \
+  -o ./output/mon-service-rest \
+  -g ma.eai.boa.xbanking \
+  -a mon-service-rest \
+  -p ma.eai.boa.xbanking
+
+# 3. Compiler le projet généré
+cd ./output/mon-service-rest
+mvn clean package
+```
+
+## Options CLI
+
+```
+Usage: jaxrs-gen [-hV] [-a=<artifactId>] [-g=<groupId>] [-o=<output>]
+                 [-p=<basePackage>] <input>
+
+Génère un projet JAX-RS pur à partir d'un projet EJB (.zip ou répertoire).
+
+      <input>       Chemin vers le projet EJB (.zip ou répertoire)
+  -a, --artifact-id ArtifactId Maven du projet généré (défaut: rest-api)
+  -g, --group-id    GroupId Maven du projet généré (défaut: com.bank.api)
+  -h, --help        Affiche l'aide
+  -o, --output      Répertoire de sortie (défaut: ./generated-jaxrs)
+  -p, --package     Package de base du code généré (défaut: com.bank.api)
+  -V, --version     Affiche la version
+```
 
 ## Fonctionnalités
 
@@ -23,7 +63,7 @@ Module Maven indépendant qui prend un projet EJB ou JAX-WS (SOAP) en entrée (`
 | Génération Resources | `@Path`, `@GET`/`@POST`/`@PUT`/`@DELETE`, `@Consumes`/`@Produces` JSON, `@ApplicationScoped` |
 | Génération DTOs | Request/Response en JSON pour chaque méthode |
 | Inférence HTTP | Détermine GET/POST/PUT/DELETE à partir du nom de la méthode |
-| CLI picocli | Exécution en ligne de commande |
+| CLI picocli | Exécution en ligne de commande avec aide intégrée |
 
 ## Ce que ce module n'est PAS
 
@@ -31,98 +71,24 @@ Module Maven indépendant qui prend un projet EJB ou JAX-WS (SOAP) en entrée (`
 - **Pas de dépendance EJB** : le POM généré ne contient pas `jakarta.ejb-api`
 - **Pas de BIAN**, pas de résilience (CircuitBreaker/Retry), pas d'ACL
 
-## Prérequis
-
-- Java 17+
-- Maven 3.8+
-
-## Installation
-
-```bash
-git clone https://github.com/compleoRepos/jaxrs-wrapper-generator.git
-cd jaxrs-wrapper-generator
-mvn clean install
-```
-
-## Utilisation
-
-### En ligne de commande
-
-```bash
-# Depuis un .zip
-java -jar target/jaxrs-wrapper-generator-1.0.0-SNAPSHOT-jar-with-dependencies.jar \
-  /path/to/projet-ejb.zip \
-  -o /path/to/output \
-  -g com.bank.api \
-  -a mon-service-rest \
-  -p com.bank.api
-
-# Depuis un répertoire
-java -jar target/jaxrs-wrapper-generator-1.0.0-SNAPSHOT-jar-with-dependencies.jar \
-  /path/to/projet-ejb/ \
-  -o /path/to/output \
-  -g com.bank.api \
-  -a mon-service-rest \
-  -p com.bank.api
-```
-
-### Options CLI
-
-| Option | Description | Défaut |
-|---|---|---|
-| `<input>` | Chemin vers le projet EJB/SOAP (.zip ou répertoire) | *obligatoire* |
-| `-o, --output` | Répertoire de sortie | `./generated-jaxrs` |
-| `-g, --group-id` | GroupId Maven | `com.bank.generated` |
-| `-a, --artifact-id` | ArtifactId Maven | déduit du nom du projet |
-| `-p, --package` | Package de base | déduit du groupId |
-
-### Comme dépendance Maven
-
-```xml
-<dependency>
-    <groupId>com.bank.tools</groupId>
-    <artifactId>jaxrs-wrapper-generator</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
-</dependency>
-```
-
-```java
-EjbZipParser parser = new EjbZipParser();
-List<EjbInfo> ejbs = parser.parse(Path.of("projet-ejb.zip"));
-
-JaxrsProjectGenerator generator = new JaxrsProjectGenerator(
-    "com.bank.api", "mon-service-rest", "com.bank.api");
-generator.generate(ejbs, Path.of("output"));
-```
-
 ## Structure du projet généré
 
 ```
 output/
 ├── pom.xml                          (Jakarta EE 10 + JSON-B — PAS de jakarta.ejb-api)
 └── src/main/
-    ├── java/com/bank/api/
+    ├── java/{package}/
     │   ├── config/
     │   │   └── JaxRsApplication.java       (@ApplicationPath("/api"))
     │   ├── resource/
-    │   │   ├── CommandechequierResource.java  (@Path, logique métier directe)
-    │   │   └── VirementResource.java
+    │   │   └── XxxResource.java            (@Path, logique métier directe)
     │   └── dto/
-    │       ├── EnregistrerCommandeRequest.java
-    │       ├── EffectuerVirementRequest.java
-    │       ├── ErrorResponse.java
-    │       └── ...
+    │       ├── XxxRequest.java
+    │       ├── XxxResponse.java
+    │       └── ErrorResponse.java
     └── resources/
         └── META-INF/beans.xml
 ```
-
-## Comportement de la transformation
-
-1. **Si le corps de la méthode est disponible** (implémentation `@Stateless` ou classe `@WebService` trouvée) :
-   le code métier est extrait et injecté directement dans la Resource JAX-RS.
-
-2. **Si seule l'interface est disponible** (pas d'implémentation) :
-   un stub `// TODO: implémenter la logique métier` est généré.
 
 ## Inférence des méthodes HTTP
 
@@ -140,11 +106,14 @@ mvn test
 ```
 
 **50 tests** au total :
-- `EjbZipParserTest` (5) : parsing EJB classique (@Remote/@Stateless)
-- `WebServiceParserTest` (5) : parsing @WebService/SOAP, Spring Boot ignoré
-- `JaxrsProjectGeneratorTest` (11) : génération et structure du projet
-- `RealProjectsIntegrationTest` (9) : projets réels (ZIP fournis)
-- `FullAuditTest` (20) : audit exhaustif sur 19 projets
+
+| Suite | Tests | Couverture |
+|---|:---:|---|
+| `EjbZipParserTest` | 5 | Parsing EJB classique (@Remote/@Stateless) |
+| `WebServiceParserTest` | 5 | Parsing @WebService/SOAP, Spring Boot ignoré |
+| `JaxrsProjectGeneratorTest` | 11 | Génération et structure du projet |
+| `RealProjectsIntegrationTest` | 9 | Projets réels (ZIP fournis) |
+| `FullAuditTest` | 20 | Audit exhaustif sur 19 projets |
 
 ## Architecture
 
@@ -162,27 +131,12 @@ src/main/java/com/bank/tools/jaxrs/
     └── JaxrsGeneratorCli.java      (CLI picocli)
 ```
 
-## Audit des projets réels (19 projets testés)
+## Prérequis
 
-| Projet | EJBs | Méthodes | Corps extraits | Type |
-|---|:---:|:---:|:---:|---|
-| commande-chequier-bmcedirect | 1 | 3 | 3 | STATELESS |
-| activation-carte-bmcedirect | 1 | 1 | 1 | STATELESS |
-| interface-credit-jocker | 2 | 16 | 16 | WEBSERVICE |
-| avis-opere | 1 | 1 | 1 | STATELESS |
-| coordonnees-3dsecure-bmcedirect | 1 | 1 | 1 | STATELESS |
-| demande-dotation | 1 | 7 | 7 | STATELESS |
-| interface-send-sms | 2 | 2 | 2 | WEBSERVICE |
-| mise-disposition-bmcedirect | 1 | 2 | 2 | STATELESS |
-| operation-avenir-services | 1 | 1 | 1 | STATELESS |
-| opposition-carte-bmcedirect | 1 | 1 | 1 | STATELESS |
-| produits-epargne-bmcedirect | 2 | 4 | 4 | STATELESS |
-| push-notification | 1 | 1 | 1 | STATELESS |
-| releve-carte-bmcedirect | 1 | 5 | 5 | STATELESS |
-| souscription-assistance-bmcedirect | 1 | 4 | 4 | STATELESS |
-| souscription-opv-bmcedirect | 1 | 1 | 1 | STATELESS |
-| tockenisation-carte-bmcedirect | 1 | 1 | 1 | STATELESS |
-| transfert-euro-bmce-direct | 0 | 0 | 0 | *(déjà REST)* |
-| vente-distance-carte-monetique | 1 | 1 | 1 | STATELESS |
-| virement-permanent-bmcedirect | 1 | 26 | 26 | STATELESS |
-| **TOTAL** | **20** | **78** | **78** | |
+- Java 17+
+- Maven 3.8+
+
+## Documentation
+
+- [Guide d'installation et d'utilisation détaillé](docs/INSTALL.md)
+- [Résultats d'audit](AUDIT-FINDINGS.md)
