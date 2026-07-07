@@ -82,6 +82,9 @@ public class JaxrsProjectGenerator {
         boolean multiEjb = ejbs.size() > 1;
 
         for (EjbInfo ejb : ejbs) {
+            // Dédupliquer les méthodes surchargées (même nom, params différents)
+            deduplicateOverloadedMethods(ejb);
+
             Map<String, List<EnvelopeField>> inputFieldsByMethod = new LinkedHashMap<>();
             Map<String, List<EnvelopeField>> outputFieldsByMethod = new LinkedHashMap<>();
             extractEnvelopeFields(ejb, inputFieldsByMethod, outputFieldsByMethod);
@@ -103,6 +106,32 @@ public class JaxrsProjectGenerator {
         generateBeansXml(srcResources);
 
         log.info("Project generation complete: {}", outputDir);
+    }
+
+    // ===== Déduplication des méthodes surchargées =====
+
+    /**
+     * Si une interface EJB contient des méthodes surchargées (même nom, params différents),
+     * on renomme les doublons avec un suffixe numérique pour éviter les collisions
+     * dans les DTOs, Converters et Resources générés.
+     */
+    private void deduplicateOverloadedMethods(EjbInfo ejb) {
+        Map<String, Integer> nameCount = new LinkedHashMap<>();
+        for (MethodInfo method : ejb.getMethods()) {
+            nameCount.merge(method.getName(), 1, Integer::sum);
+        }
+
+        // Renommer les doublons
+        Map<String, Integer> currentIndex = new HashMap<>();
+        for (MethodInfo method : ejb.getMethods()) {
+            String baseName = method.getName();
+            if (nameCount.getOrDefault(baseName, 1) > 1) {
+                int idx = currentIndex.merge(baseName, 1, Integer::sum);
+                if (idx > 1) {
+                    method.setName(baseName + idx);
+                }
+            }
+        }
     }
 
     // ===== Extraction des champs Envelope =====
@@ -421,7 +450,11 @@ public class JaxrsProjectGenerator {
         sb.append("    @Path(\"").append(methodPath).append("\")\n");
 
         // Signature
-        if (httpMethod == MethodInfo.HttpMethod.GET && method.getParameters().size() <= 1) {
+        boolean isSimpleGetParam = httpMethod == MethodInfo.HttpMethod.GET
+                && method.getParameters().size() <= 1
+                && (method.getParameters().isEmpty() || isPrimitiveType(method.getParameters().get(0).getTypeSimple()));
+
+        if (isSimpleGetParam) {
             if (!method.getParameters().isEmpty()) {
                 ParameterInfo param = method.getParameters().get(0);
                 sb.append("    public Response ").append(method.getName())
@@ -439,7 +472,7 @@ public class JaxrsProjectGenerator {
         sb.append("        try {\n");
         sb.append("            // 1. Convertir le DTO JSON en Envelope XML\n");
 
-        if (httpMethod == MethodInfo.HttpMethod.GET && method.getParameters().size() <= 1) {
+        if (isSimpleGetParam) {
             if (!method.getParameters().isEmpty()) {
                 ParameterInfo param = method.getParameters().get(0);
                 sb.append("            Envelope envelopeIn = converter.toEnvelope").append(dtoPrefix).append("(").append(param.getName()).append(");\n");
@@ -454,13 +487,19 @@ public class JaxrsProjectGenerator {
         sb.append("            // 2. Appeler le service EJB\n");
         sb.append("            Envelope envelopeOut = ejbService.process(envelopeIn);\n");
         sb.append("\n");
+        // Avoid variable name collision if a param is named 'code'
+        boolean hasCodeParam = method.getParameters().stream()
+                .anyMatch(p -> "code".equals(p.getName()));
+        String codeVar = hasCodeParam ? "responseCode" : "code";
+        String msgVar = hasCodeParam ? "responseMessage" : "message";
+
         sb.append("            // 3. Extraire le code retour et mapper vers HTTP status\n");
-        sb.append("            String code = envelopeOut.getNodeAsString(\"flux/code\");\n");
-        sb.append("            String message = envelopeOut.getNodeAsString(\"flux/message\");\n");
+        sb.append("            String ").append(codeVar).append(" = envelopeOut.getNodeAsString(\"flux/code\");\n");
+        sb.append("            String ").append(msgVar).append(" = envelopeOut.getNodeAsString(\"flux/message\");\n");
         sb.append("\n");
-        sb.append("            if (!CodeMapper.isSuccess(code)) {\n");
-        sb.append("                return Response.status(CodeMapper.toHttpStatus(code))\n");
-        sb.append("                        .entity(new ErrorResponse(code, message))\n");
+        sb.append("            if (!CodeMapper.isSuccess(").append(codeVar).append(")) {\n");
+        sb.append("                return Response.status(CodeMapper.toHttpStatus(").append(codeVar).append("))\n");
+        sb.append("                        .entity(new ErrorResponse(").append(codeVar).append(", ").append(msgVar).append("))\n");
         sb.append("                        .build();\n");
         sb.append("            }\n");
         sb.append("\n");
@@ -660,7 +699,11 @@ public class JaxrsProjectGenerator {
         String actionName = method.getName();
         MethodInfo.HttpMethod httpMethod = method.getHttpMethod() != null ? method.getHttpMethod() : method.inferHttpMethod();
 
-        if (httpMethod == MethodInfo.HttpMethod.GET && method.getParameters().size() <= 1) {
+        boolean isSimpleGetParam = httpMethod == MethodInfo.HttpMethod.GET
+                && method.getParameters().size() <= 1
+                && (method.getParameters().isEmpty() || isPrimitiveType(method.getParameters().get(0).getTypeSimple()));
+
+        if (isSimpleGetParam) {
             if (!method.getParameters().isEmpty()) {
                 ParameterInfo param = method.getParameters().get(0);
                 sb.append("    /**\n");
@@ -692,7 +735,9 @@ public class JaxrsProjectGenerator {
             sb.append("        envelope.addNode(\"flux/action\", \"").append(actionName).append("\");\n");
             for (EnvelopeField field : fields) {
                 String getter = "request.get" + capitalize(field.getFieldName()) + "()";
-                if ("int".equals(field.getType()) || "boolean".equals(field.getType())) {
+                if ("int".equals(field.getType()) || "boolean".equals(field.getType())
+                        || "long".equals(field.getType()) || "double".equals(field.getType())
+                        || "float".equals(field.getType()) || "short".equals(field.getType())) {
                     sb.append("        envelope.addNode(\"").append(field.getPath()).append("\", String.valueOf(").append(getter).append("));\n");
                 } else {
                     sb.append("        envelope.addNode(\"").append(field.getPath()).append("\", ").append(getter).append(");\n");
@@ -758,6 +803,32 @@ public class JaxrsProjectGenerator {
             sb.append(Character.toLowerCase(c));
         }
         return sb.toString();
+    }
+
+    private boolean isPrimitiveType(String type) {
+        if (type == null) return true;
+        switch (type) {
+            case "String":
+            case "int":
+            case "Integer":
+            case "long":
+            case "Long":
+            case "double":
+            case "Double":
+            case "float":
+            case "Float":
+            case "boolean":
+            case "Boolean":
+            case "short":
+            case "Short":
+            case "byte":
+            case "Byte":
+            case "char":
+            case "Character":
+                return true;
+            default:
+                return false;
+        }
     }
 
     private String javaType(String type) {
