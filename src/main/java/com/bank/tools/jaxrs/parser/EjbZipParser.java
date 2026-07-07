@@ -195,6 +195,14 @@ public class EjbZipParser {
                         interfaceMap.put(decl.getNameAsString(), ejb);
                         log.debug("Found EJB interface: {}", decl.getNameAsString());
                     }
+
+                    // Vérifier si c'est une interface @WebService (JAX-WS generated)
+                    Optional<AnnotationExpr> wsIfaceAnnotation = decl.getAnnotations().stream()
+                            .filter(a -> WEBSERVICE_ANNOTATIONS.contains(a.getNameAsString()))
+                            .findFirst();
+                    if (wsIfaceAnnotation.isPresent()) {
+                        handleWebServiceInterface(decl, wsIfaceAnnotation.get(), packageName, webServiceEjbs);
+                    }
                 } else {
                     // Classe: vérifier si c'est un @Stateless/@Stateful etc.
                     Optional<AnnotationExpr> ejbAnnotation = decl.getAnnotations().stream()
@@ -313,6 +321,63 @@ public class EjbZipParser {
         if (!ejb.getMethods().isEmpty()) {
             webServiceEjbs.add(ejb);
             log.debug("Found @WebService class: {} ({} methods)", decl.getNameAsString(), ejb.getMethods().size());
+        }
+    }
+
+    /**
+     * Traite une interface annotée @WebService (générée par JAX-WS RI) :
+     * extrait les méthodes @WebMethod comme des opérations à transformer en endpoints REST.
+     * Contrairement aux classes @WebService, les interfaces n'ont pas de corps de méthode.
+     */
+    private void handleWebServiceInterface(ClassOrInterfaceDeclaration decl, AnnotationExpr wsAnnotation,
+                                           String packageName, List<EjbInfo> webServiceEjbs) {
+        EjbInfo ejb = new EjbInfo(decl.getNameAsString(), packageName);
+        ejb.setImplementationName(decl.getNameAsString());
+        ejb.setEjbType(EjbInfo.EjbType.WEBSERVICE);
+
+        // Extraire le name ou targetNamespace depuis @WebService si disponible
+        String serviceName = extractAnnotationAttribute(wsAnnotation, "name");
+        if (serviceName != null) {
+            ejb.setJndiName(serviceName);
+        }
+
+        // Extraire les méthodes @WebMethod (ou toutes les méthodes publiques)
+        boolean hasWebMethodAnnotations = decl.getMethods().stream()
+                .anyMatch(md -> md.getAnnotations().stream()
+                        .anyMatch(a -> WEBMETHOD_ANNOTATIONS.contains(a.getNameAsString())));
+
+        for (MethodDeclaration md : decl.getMethods()) {
+            if (md.isPrivate() || md.isProtected()) continue;
+
+            if (hasWebMethodAnnotations) {
+                boolean isWebMethod = md.getAnnotations().stream()
+                        .anyMatch(a -> WEBMETHOD_ANNOTATIONS.contains(a.getNameAsString()));
+                if (!isWebMethod) continue;
+            }
+
+            MethodInfo method = new MethodInfo(
+                    md.getNameAsString(),
+                    md.getType().asString()
+            );
+
+            md.getParameters().forEach(p -> {
+                method.addParameter(new ParameterInfo(
+                        p.getNameAsString(),
+                        p.getType().asString()
+                ));
+            });
+
+            md.getThrownExceptions().forEach(ex -> {
+                method.getThrownExceptions().add(ex.asString());
+            });
+
+            // Pas de corps pour les interfaces
+            ejb.addMethod(method);
+        }
+
+        if (!ejb.getMethods().isEmpty()) {
+            webServiceEjbs.add(ejb);
+            log.debug("Found @WebService interface: {} ({} methods)", decl.getNameAsString(), ejb.getMethods().size());
         }
     }
 
