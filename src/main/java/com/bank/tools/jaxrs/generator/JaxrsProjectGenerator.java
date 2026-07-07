@@ -79,14 +79,24 @@ public class JaxrsProjectGenerator {
         generateJaxRsApplication(configDir);
         generateCodeMapper(configDir);
 
+        boolean multiEjb = ejbs.size() > 1;
+
         for (EjbInfo ejb : ejbs) {
             Map<String, List<EnvelopeField>> inputFieldsByMethod = new LinkedHashMap<>();
             Map<String, List<EnvelopeField>> outputFieldsByMethod = new LinkedHashMap<>();
             extractEnvelopeFields(ejb, inputFieldsByMethod, outputFieldsByMethod);
 
-            generateResource(resourceDir, ejb);
-            generateDtos(dtoDir, ejb, inputFieldsByMethod, outputFieldsByMethod);
-            generateConverter(converterDir, ejb, inputFieldsByMethod, outputFieldsByMethod);
+            // Si multi-EJB, créer un sous-package DTO par EJB pour éviter les collisions
+            String ejbDtoSubPackage = multiEjb ? ejb.deriveResourceName().replace("-", "") : null;
+            Path ejbDtoDir = dtoDir;
+            if (ejbDtoSubPackage != null) {
+                ejbDtoDir = dtoDir.resolve(ejbDtoSubPackage);
+                Files.createDirectories(ejbDtoDir);
+            }
+
+            generateResource(resourceDir, ejb, ejbDtoSubPackage);
+            generateDtos(ejbDtoDir, ejb, inputFieldsByMethod, outputFieldsByMethod, ejbDtoSubPackage);
+            generateConverter(converterDir, ejb, inputFieldsByMethod, outputFieldsByMethod, ejbDtoSubPackage);
         }
 
         generateErrorResponseDto(dtoDir);
@@ -127,32 +137,60 @@ public class JaxrsProjectGenerator {
                 continue;
             }
 
-            // Champs d'entrée
-            Set<String> seenInput = new LinkedHashSet<>();
-            List<EnvelopeField> inFields = new ArrayList<>();
-            Matcher m = GET_NODE_PATTERN.matcher(body);
-            while (m.find()) {
-                String path = m.group(1);
-                if (path.contains(",") || path.equals("flux/action")) continue;
-                String fieldName = extractFieldName(path);
-                if (seenInput.add(fieldName)) {
-                    String type = body.contains("getNodeAsInt(\"" + path + "\")") ? "int" :
-                                  body.contains("getNodeAsBoolean(\"" + path + "\")") ? "boolean" : "String";
-                    inFields.add(new EnvelopeField(path, fieldName, type));
-                }
-            }
-            if (inFields.isEmpty()) {
-                inFields = parametersToFields(method);
-            }
-            inputFields.put(method.getName(), inFields);
+            // Déterminer si la méthode reçoit un Envelope en entrée
+            // Si oui, les getNodeAsString sont des lectures de l'Envelope d'entrée (= champs input)
+            // Si non (params primitifs), les getNodeAsString sont sur la réponse EJB (= champs output)
+            boolean hasEnvelopeParam = method.getParameters().stream()
+                    .anyMatch(p -> p.getTypeSimple().equals("Envelope"));
 
-            // Champs de sortie
+            if (hasEnvelopeParam) {
+                // Pattern EJB classique : process(Envelope envelopeIn)
+                // getNodeAsString = lecture de l'Envelope d'entrée = champs INPUT
+                Set<String> seenInput = new LinkedHashSet<>();
+                List<EnvelopeField> inFields = new ArrayList<>();
+                Matcher m = GET_NODE_PATTERN.matcher(body);
+                while (m.find()) {
+                    String path = m.group(1);
+                    if (path.contains(",") || path.equals("flux/action")) continue;
+                    String fieldName = extractFieldName(path);
+                    if (seenInput.add(fieldName)) {
+                        String type = body.contains("getNodeAsInt(\"" + path + "\")") ? "int" :
+                                      body.contains("getNodeAsBoolean(\"" + path + "\")") ? "boolean" : "String";
+                        inFields.add(new EnvelopeField(path, fieldName, type));
+                    }
+                }
+                if (inFields.isEmpty()) {
+                    inFields = parametersToFields(method);
+                }
+                inputFields.put(method.getName(), inFields);
+            } else {
+                // Pattern WebService : getLigneDeclicGAB(String compte, String canal, String reference)
+                // Les paramètres de la méthode = champs INPUT
+                inputFields.put(method.getName(), parametersToFields(method));
+            }
+
+            // Champs de sortie : getNodeAsString sur la réponse + ecrireString
             Set<String> seenOutput = new LinkedHashSet<>();
             List<EnvelopeField> outFields = new ArrayList<>();
             outFields.add(new EnvelopeField("flux/code", "code", "String"));
             outFields.add(new EnvelopeField("flux/message", "message", "String"));
             seenOutput.add("code");
             seenOutput.add("message");
+
+            // Pour les WebServices, les getNodeAsString sont des champs de sortie
+            if (!hasEnvelopeParam) {
+                Matcher m = GET_NODE_PATTERN.matcher(body);
+                while (m.find()) {
+                    String path = m.group(1);
+                    if (path.contains(",") || path.equals("flux/action")) continue;
+                    String fieldName = extractFieldName(path);
+                    if (seenOutput.add(fieldName)) {
+                        String type = body.contains("getNodeAsInt(\"" + path + "\")") ? "int" :
+                                      body.contains("getNodeAsBoolean(\"" + path + "\")") ? "boolean" : "String";
+                        outFields.add(new EnvelopeField(path, fieldName, type));
+                    }
+                }
+            }
 
             Matcher wfM = WRITE_FLUX_FIELD_PATTERN.matcher(body);
             while (wfM.find()) {
@@ -318,7 +356,7 @@ public class JaxrsProjectGenerator {
 
     // ===== Resource (Endpoint JAX-RS — adaptateur pur) =====
 
-    private void generateResource(Path resourceDir, EjbInfo ejb) throws IOException {
+    private void generateResource(Path resourceDir, EjbInfo ejb, String ejbDtoSubPackage) throws IOException {
         String resourceName = capitalize(ejb.deriveResourceName().replace("-", "")) + "Resource";
         String converterName = capitalize(ejb.deriveResourceName().replace("-", "")) + "Converter";
         String path = "/" + ejb.deriveResourceName();
@@ -336,7 +374,12 @@ public class JaxrsProjectGenerator {
         sb.append("import ma.eai.midw.connectors.SynchroneService;\n");
         sb.append("import ").append(basePackage).append(".config.CodeMapper;\n");
         sb.append("import ").append(basePackage).append(".converter.").append(converterName).append(";\n");
-        sb.append("import ").append(basePackage).append(".dto.*;\n");
+        if (ejbDtoSubPackage != null) {
+            sb.append("import ").append(basePackage).append(".dto.").append(ejbDtoSubPackage).append(".*;\n");
+        } else {
+            sb.append("import ").append(basePackage).append(".dto.*;\n");
+        }
+        sb.append("import ").append(basePackage).append(".dto.ErrorResponse;\n");
         sb.append("\n");
 
         sb.append("/**\n");
@@ -438,22 +481,27 @@ public class JaxrsProjectGenerator {
 
     private void generateDtos(Path dtoDir, EjbInfo ejb,
                               Map<String, List<EnvelopeField>> inputFields,
-                              Map<String, List<EnvelopeField>> outputFields) throws IOException {
+                              Map<String, List<EnvelopeField>> outputFields,
+                              String ejbDtoSubPackage) throws IOException {
         for (MethodInfo method : ejb.getMethods()) {
             String dtoPrefix = capitalize(method.getName());
             List<EnvelopeField> inFields = inputFields.getOrDefault(method.getName(), Collections.emptyList());
             List<EnvelopeField> outFields = outputFields.getOrDefault(method.getName(), Collections.emptyList());
 
-            generateRequestDto(dtoDir, dtoPrefix, method, inFields);
-            generateResponseDto(dtoDir, dtoPrefix, outFields);
+            generateRequestDto(dtoDir, dtoPrefix, method, inFields, ejbDtoSubPackage);
+            generateResponseDto(dtoDir, dtoPrefix, outFields, ejbDtoSubPackage);
         }
     }
 
     private void generateRequestDto(Path dtoDir, String prefix, MethodInfo method,
-                                    List<EnvelopeField> fields) throws IOException {
+                                    List<EnvelopeField> fields, String ejbDtoSubPackage) throws IOException {
         String className = prefix + "Request";
         StringBuilder sb = new StringBuilder();
-        sb.append("package ").append(basePackage).append(".dto;\n\n");
+        if (ejbDtoSubPackage != null) {
+            sb.append("package ").append(basePackage).append(".dto.").append(ejbDtoSubPackage).append(";\n\n");
+        } else {
+            sb.append("package ").append(basePackage).append(".dto;\n\n");
+        }
         sb.append("import java.io.Serializable;\n\n");
         sb.append("/**\n");
         sb.append(" * DTO Request pour ").append(method.getName()).append(".\n");
@@ -486,10 +534,14 @@ public class JaxrsProjectGenerator {
     }
 
     private void generateResponseDto(Path dtoDir, String prefix,
-                                     List<EnvelopeField> fields) throws IOException {
+                                     List<EnvelopeField> fields, String ejbDtoSubPackage) throws IOException {
         String className = prefix + "Response";
         StringBuilder sb = new StringBuilder();
-        sb.append("package ").append(basePackage).append(".dto;\n\n");
+        if (ejbDtoSubPackage != null) {
+            sb.append("package ").append(basePackage).append(".dto.").append(ejbDtoSubPackage).append(";\n\n");
+        } else {
+            sb.append("package ").append(basePackage).append(".dto;\n\n");
+        }
         sb.append("import java.io.Serializable;\n\n");
         sb.append("/**\n");
         sb.append(" * DTO Response pour ").append(prefix).append(".\n");
@@ -568,13 +620,18 @@ public class JaxrsProjectGenerator {
 
     private void generateConverter(Path converterDir, EjbInfo ejb,
                                    Map<String, List<EnvelopeField>> inputFields,
-                                   Map<String, List<EnvelopeField>> outputFields) throws IOException {
+                                   Map<String, List<EnvelopeField>> outputFields,
+                                   String ejbDtoSubPackage) throws IOException {
         String converterName = capitalize(ejb.deriveResourceName().replace("-", "")) + "Converter";
 
         StringBuilder sb = new StringBuilder();
         sb.append("package ").append(basePackage).append(".converter;\n\n");
         sb.append("import ma.eai.commons.services.parsing.Envelope;\n");
-        sb.append("import ").append(basePackage).append(".dto.*;\n\n");
+        if (ejbDtoSubPackage != null) {
+            sb.append("import ").append(basePackage).append(".dto.").append(ejbDtoSubPackage).append(".*;\n\n");
+        } else {
+            sb.append("import ").append(basePackage).append(".dto.*;\n\n");
+        }
         sb.append("/**\n");
         sb.append(" * Converter bidirectionnel JSON DTO <-> Envelope pour ").append(ejb.getInterfaceName()).append(".\n");
         sb.append(" * Assure la conversion :\n");
