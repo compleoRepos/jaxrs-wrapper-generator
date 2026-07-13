@@ -59,7 +59,7 @@ mvn clean package
 
 Cette commande :
 - Compile le code source
-- Exécute les tests unitaires (50 tests)
+- Exécute les tests unitaires (90 tests)
 - Produit le JAR exécutable via le plugin `maven-shade-plugin`
 
 Le JAR final se trouve dans :
@@ -254,26 +254,50 @@ param.getType();              // "String"
 
 ## Structure du projet généré
 
+### Mode V2 (EJB SynchroneService avec codes fonction)
+
+```
+output/
+├── pom.xml                              (POM parent multi-modules)
+├── mon-service-rest-ear/
+│   └── pom.xml                          (EAR packaging, was.deploy.prop)
+└── mon-service-rest-web/
+    ├── pom.xml                          (WAR, dépendance EJB original)
+    ├── Dockerfile                       (ibmcom/websphere-traditional)
+    ├── install_app.py                   (Script wsadmin)
+    ├── run-local.sh                     (Test local Open Liberty)
+    └── src/main/java/{package}/
+        ├── config/
+        │   ├── JaxRsApplication.java
+        │   ├── CodeMapper.java
+        │   ├── SecurityHeadersFilter.java
+        │   ├── RequestLoggingFilter.java
+        │   └── InputSanitizer.java
+        ├── resource/
+        │   └── XxxResource.java         (JNDI lookup, endpoints par code fonction)
+        ├── converter/
+        │   └── XxxConverter.java        (toEnvelope/fromEnvelope)
+        └── dto/
+            ├── CodeFonction1Request.java
+            ├── CodeFonction1Response.java
+            └── ErrorResponse.java
+```
+
+### Mode V1 (fallback)
+
 ```
 output/
 ├── pom.xml
-└── src/
-    └── main/
-        ├── java/{package}/
-        │   ├── config/
-        │   │   └── JaxRsApplication.java
-        │   ├── resource/
-        │   │   ├── XxxResource.java
-        │   │   └── YyyResource.java
-        │   └── dto/
-        │       ├── Method1Request.java
-        │       ├── Method1Response.java
-        │       ├── Method2Request.java
-        │       ├── Method2Response.java
-        │       └── ErrorResponse.java
-        └── resources/
-            └── META-INF/
-                └── beans.xml
+└── mon-service-rest-web/
+    └── src/main/java/{package}/
+        ├── config/
+        │   └── JaxRsApplication.java
+        ├── resource/
+        │   └── XxxResource.java         (logique métier directe)
+        └── dto/
+            ├── Method1Request.java
+            ├── Method1Response.java
+            └── ErrorResponse.java
 ```
 
 ### Détail des fichiers générés
@@ -307,18 +331,30 @@ output/
 
 ## Déploiement du projet généré
 
-### Compiler le projet généré
+### Mode V2 — WebSphere Traditional (Docker)
 
 ```bash
-cd /chemin/vers/sortie
+# 1. Compiler le projet multi-modules
+cd mon-service-rest
 mvn clean package
+
+# 2. Build Docker (DEPUIS LA RACINE du projet, pas depuis le module web)
+docker build -f mon-service-rest-web/Dockerfile -t mon-service-rest .
+
+# 3. Lancer le conteneur
+docker run -d -p 9080:9080 -p 9443:9443 mon-service-rest
+
+# 4. Tester (attendre 30-60s pour le démarrage WAS)
+curl http://localhost:9080/mon-service-rest-web/api/xxx/endpoint
 ```
 
-Cela produit un fichier WAR dans `target/`.
+> **Important** : Le `docker build` doit être exécuté depuis la racine du projet (pas depuis le module web) car le Dockerfile copie l'EAR depuis le module ear.
 
-### Serveurs d'application compatibles
+Pour le guide de déploiement complet (wsadmin, CI/CD, JNDI, dépannage), voir [docs/DEPLOYMENT-WAS.md](docs/DEPLOYMENT-WAS.md).
 
-Le WAR généré est compatible avec tout serveur Jakarta EE 10 :
+### Mode V1 — Serveurs Jakarta EE
+
+Le WAR V1 est compatible avec tout serveur Jakarta EE 10 :
 
 | Serveur | Version minimale | Commande de déploiement |
 |---------|:---:|---|
@@ -327,30 +363,16 @@ Le WAR généré est compatible avec tout serveur Jakarta EE 10 :
 | Open Liberty | 23.x+ | Configurer dans `server.xml` |
 | TomEE | 9+ | Copier le WAR dans `webapps/` |
 
-### Exemple avec WildFly
-
 ```bash
 # Compiler
 cd /chemin/vers/sortie
 mvn clean package
 
-# Déployer
-cp target/commande-chequier-rest.war $WILDFLY_HOME/standalone/deployments/
+# Déployer sur WildFly
+cp mon-service-rest-web/target/mon-service-rest-web.war $WILDFLY_HOME/standalone/deployments/
 
 # Tester
-curl http://localhost:8080/commande-chequier-rest/api/command-chequier/get-action?actionValue=enrgCommande
-```
-
-### Exemple avec Docker (WildFly)
-
-```dockerfile
-FROM quay.io/wildfly/wildfly:27.0.0.Final-jdk17
-COPY target/commande-chequier-rest.war /opt/jboss/wildfly/standalone/deployments/
-```
-
-```bash
-docker build -t mon-service-rest .
-docker run -p 8080:8080 mon-service-rest
+curl http://localhost:8080/mon-service-rest-web/api/xxx/endpoint
 ```
 
 ---
@@ -512,4 +534,5 @@ java -Dfile.encoding=UTF-8 -jar target/jaxrs-wrapper-generator-1.0.0-SNAPSHOT.ja
 
 - **Dépôt GitHub** : https://github.com/compleoRepos/jaxrs-wrapper-generator
 - **Issues** : https://github.com/compleoRepos/jaxrs-wrapper-generator/issues
-- **Tests** : `mvn test` (50 tests, BUILD SUCCESS attendu)
+- **Tests** : `mvn test` (90 tests, BUILD SUCCESS attendu)
+- **Guide de déploiement WAS** : [docs/DEPLOYMENT-WAS.md](docs/DEPLOYMENT-WAS.md)
