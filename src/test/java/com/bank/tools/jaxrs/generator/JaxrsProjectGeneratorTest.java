@@ -82,33 +82,60 @@ class JaxrsProjectGeneratorTest {
 
     // ===== Tests de structure =====
 
+    private static final String WEB_MODULE = "commande-chequier-rest-web";
+    private static final String EJB_MODULE = "commande-chequier-rest-ejb";
+    private static final String EAR_MODULE = "commande-chequier-rest-ear";
+
     @Test
-    @DisplayName("Génère la structure complète du projet WAR adaptateur")
+    @DisplayName("G\u00e9n\u00e8re la structure multi-modules (parent + ejb + ear + web)")
     void testGeneratesProjectStructure() throws IOException {
         generator.generate(List.of(createTestEjb()), outputDir);
 
         String pkg = "ma/eai/boa/xbanking";
-        assertTrue(Files.exists(outputDir.resolve("src/main/java/" + pkg + "/resource")));
-        assertTrue(Files.exists(outputDir.resolve("src/main/java/" + pkg + "/dto")));
-        assertTrue(Files.exists(outputDir.resolve("src/main/java/" + pkg + "/converter")));
-        assertTrue(Files.exists(outputDir.resolve("src/main/java/" + pkg + "/config")));
-        assertTrue(Files.exists(outputDir.resolve("src/main/resources/META-INF/beans.xml")));
+        // Parent POM
         assertTrue(Files.exists(outputDir.resolve("pom.xml")));
+        // EJB module
+        assertTrue(Files.exists(outputDir.resolve(EJB_MODULE + "/pom.xml")));
+        assertTrue(Files.exists(outputDir.resolve(EJB_MODULE + "/src/main/java/" + pkg + "/service")));
+        // EAR module
+        assertTrue(Files.exists(outputDir.resolve(EAR_MODULE + "/pom.xml")));
+        // Web module
+        assertTrue(Files.exists(outputDir.resolve(WEB_MODULE + "/pom.xml")));
+        assertTrue(Files.exists(outputDir.resolve(WEB_MODULE + "/src/main/java/" + pkg + "/resource")));
+        assertTrue(Files.exists(outputDir.resolve(WEB_MODULE + "/src/main/java/" + pkg + "/dto")));
+        assertTrue(Files.exists(outputDir.resolve(WEB_MODULE + "/src/main/java/" + pkg + "/converter")));
+        assertTrue(Files.exists(outputDir.resolve(WEB_MODULE + "/src/main/java/" + pkg + "/config")));
+        assertTrue(Files.exists(outputDir.resolve(WEB_MODULE + "/src/main/resources/META-INF/beans.xml")));
+        // Deployment files
+        assertTrue(Files.exists(outputDir.resolve(WEB_MODULE + "/Dockerfile")));
+        assertTrue(Files.exists(outputDir.resolve(WEB_MODULE + "/install_app")));
+        assertTrue(Files.exists(outputDir.resolve(WEB_MODULE + "/run-local")));
     }
 
     @Test
-    @DisplayName("POM cible Java 1.8 et utilise javax (Java EE 7)")
+    @DisplayName("Parent POM est de type pom avec modules, Web POM est WAR")
     void testPomTargetsJava8() throws IOException {
         generator.generate(List.of(createTestEjb()), outputDir);
 
-        String pom = Files.readString(outputDir.resolve("pom.xml"));
-        assertTrue(pom.contains("<source>1.8</source>"), "POM doit cibler Java 1.8");
-        assertTrue(pom.contains("<target>1.8</target>"), "POM doit cibler Java 1.8");
-        assertTrue(pom.contains("<packaging>war</packaging>"), "POM doit être WAR");
-        assertTrue(pom.contains("javaee-api"), "POM doit contenir javaee-api (pas jakarta)");
-        assertTrue(pom.contains("eai-commons-services"), "POM doit contenir eai-commons-services");
-        assertTrue(pom.contains("eai-midw-connectors"), "POM doit contenir eai-midw-connectors");
-        assertFalse(pom.contains("jakarta"), "POM ne doit PAS contenir jakarta");
+        // Parent POM
+        String parentPom = Files.readString(outputDir.resolve("pom.xml"));
+        assertTrue(parentPom.contains("<source>1.8</source>"), "Parent POM doit cibler Java 1.8");
+        assertTrue(parentPom.contains("<packaging>pom</packaging>"), "Parent POM doit \u00eatre pom");
+        assertTrue(parentPom.contains("<module>" + EJB_MODULE + "</module>"), "Parent doit lister module EJB");
+        assertTrue(parentPom.contains("<module>" + EAR_MODULE + "</module>"), "Parent doit lister module EAR");
+        assertTrue(parentPom.contains("<module>" + WEB_MODULE + "</module>"), "Parent doit lister module Web");
+        assertTrue(parentPom.contains("javaee-api"), "Parent POM doit contenir javaee-api");
+        assertFalse(parentPom.contains("jakarta"), "Parent POM ne doit PAS contenir jakarta");
+
+        // Web POM
+        String webPom = Files.readString(outputDir.resolve(WEB_MODULE + "/pom.xml"));
+        assertTrue(webPom.contains("<packaging>war</packaging>"), "Web POM doit \u00eatre WAR");
+        assertTrue(webPom.contains("eai-commons-services"), "Web POM doit contenir eai-commons-services");
+        assertTrue(webPom.contains("eai-midw-connectors"), "Web POM doit contenir eai-midw-connectors");
+
+        // EJB POM
+        String ejbPom = Files.readString(outputDir.resolve(EJB_MODULE + "/pom.xml"));
+        assertTrue(ejbPom.contains("<packaging>ejb</packaging>"), "EJB POM doit \u00eatre ejb");
     }
 
     // ===== Tests Resource =====
@@ -175,7 +202,7 @@ class JaxrsProjectGeneratorTest {
         generator.generate(List.of(createTestEjb()), outputDir);
 
         String pkg = "ma/eai/boa/xbanking";
-        Path requestDto = outputDir.resolve("src/main/java/" + pkg + "/dto/EnrgCommandeRequest.java");
+        Path requestDto = outputDir.resolve(WEB_MODULE + "/src/main/java/" + pkg + "/dto/EnrgCommandeRequest.java");
         assertTrue(Files.exists(requestDto), "Request DTO must exist");
 
         String content = Files.readString(requestDto);
@@ -191,7 +218,7 @@ class JaxrsProjectGeneratorTest {
         generator.generate(List.of(createTestEjb()), outputDir);
 
         String pkg = "ma/eai/boa/xbanking";
-        Path responseDto = outputDir.resolve("src/main/java/" + pkg + "/dto/EnrgCommandeResponse.java");
+        Path responseDto = outputDir.resolve(WEB_MODULE + "/src/main/java/" + pkg + "/dto/EnrgCommandeResponse.java");
         assertTrue(Files.exists(responseDto), "Response DTO must exist");
 
         String content = Files.readString(responseDto);
@@ -206,7 +233,7 @@ class JaxrsProjectGeneratorTest {
         generator.generate(List.of(createTestEjb()), outputDir);
 
         String pkg = "ma/eai/boa/xbanking";
-        Path errorDto = outputDir.resolve("src/main/java/" + pkg + "/dto/ErrorResponse.java");
+        Path errorDto = outputDir.resolve(WEB_MODULE + "/src/main/java/" + pkg + "/dto/ErrorResponse.java");
         assertTrue(Files.exists(errorDto));
 
         String content = Files.readString(errorDto);
@@ -223,7 +250,7 @@ class JaxrsProjectGeneratorTest {
         generator.generate(List.of(createTestEjb()), outputDir);
 
         String pkg = "ma/eai/boa/xbanking";
-        Path converterFile = outputDir.resolve("src/main/java/" + pkg + "/converter/CommandchequierConverter.java");
+        Path converterFile = outputDir.resolve(WEB_MODULE + "/src/main/java/" + pkg + "/converter/CommandchequierConverter.java");
         assertTrue(Files.exists(converterFile), "Converter file must exist");
 
         String content = Files.readString(converterFile);
@@ -239,7 +266,7 @@ class JaxrsProjectGeneratorTest {
         generator.generate(List.of(createTestEjb()), outputDir);
 
         String pkg = "ma/eai/boa/xbanking";
-        Path converterFile = outputDir.resolve("src/main/java/" + pkg + "/converter/CommandchequierConverter.java");
+        Path converterFile = outputDir.resolve(WEB_MODULE + "/src/main/java/" + pkg + "/converter/CommandchequierConverter.java");
         String content = Files.readString(converterFile);
 
         assertTrue(content.contains("\"flux/action\""), "Converter doit ajouter flux/action");
@@ -257,7 +284,7 @@ class JaxrsProjectGeneratorTest {
         generator.generate(List.of(createTestEjb()), outputDir);
 
         String pkg = "ma/eai/boa/xbanking";
-        Path codeMapper = outputDir.resolve("src/main/java/" + pkg + "/config/CodeMapper.java");
+        Path codeMapper = outputDir.resolve(WEB_MODULE + "/src/main/java/" + pkg + "/config/CodeMapper.java");
         assertTrue(Files.exists(codeMapper));
 
         String content = Files.readString(codeMapper);
@@ -279,13 +306,14 @@ class JaxrsProjectGeneratorTest {
 
         gen.generate(ejbs, outputDir);
 
+        String webMod = "chequier-rest-api-web";
         assertTrue(Files.exists(outputDir.resolve("pom.xml")));
-        assertTrue(Files.exists(outputDir.resolve("src/main/java/com/bank/api/config/JaxRsApplication.java")));
-        assertTrue(Files.exists(outputDir.resolve("src/main/java/com/bank/api/config/CodeMapper.java")));
-        assertTrue(Files.exists(outputDir.resolve("src/main/resources/META-INF/beans.xml")));
+        assertTrue(Files.exists(outputDir.resolve(webMod + "/src/main/java/com/bank/api/config/JaxRsApplication.java")));
+        assertTrue(Files.exists(outputDir.resolve(webMod + "/src/main/java/com/bank/api/config/CodeMapper.java")));
+        assertTrue(Files.exists(outputDir.resolve(webMod + "/src/main/resources/META-INF/beans.xml")));
 
-        Path resourceDir = outputDir.resolve("src/main/java/com/bank/api/resource");
-        Path converterDir = outputDir.resolve("src/main/java/com/bank/api/converter");
+        Path resourceDir = outputDir.resolve(webMod + "/src/main/java/com/bank/api/resource");
+        Path converterDir = outputDir.resolve(webMod + "/src/main/java/com/bank/api/converter");
         assertTrue(Files.exists(resourceDir));
         assertTrue(Files.exists(converterDir));
         assertEquals(ejbs.size(), Files.list(resourceDir).count());
@@ -314,11 +342,212 @@ class JaxrsProjectGeneratorTest {
                 });
     }
 
+    // ===== Tests V2 (Function-Code-Based Generation) =====
+
+    private com.bank.tools.jaxrs.model.SourceProjectMetadata createTestSourceMetadata() {
+        com.bank.tools.jaxrs.model.SourceProjectMetadata meta = new com.bank.tools.jaxrs.model.SourceProjectMetadata();
+        meta.setEjbGroupId("ma.eai.boa.xbanking");
+        meta.setEjbArtifactId("commande-chequier-ejb");
+        meta.setEjbVersion("1.0.0");
+        com.bank.tools.jaxrs.model.SourceProjectMetadata.JndiBinding binding =
+                new com.bank.tools.jaxrs.model.SourceProjectMetadata.JndiBinding();
+        binding.setEjbName("CommandChequierService");
+        binding.setBindingName("ejb/CommandChequierService");
+        meta.setJndiBindings(java.util.Collections.singletonList(binding));
+        return meta;
+    }
+
+    private EjbInfo createTestEjbWithFunctionCodes() {
+        EjbInfo ejb = createTestEjb();
+
+        // Add function codes (V2 path)
+        com.bank.tools.jaxrs.model.FunctionCodeInfo fci1 = new com.bank.tools.jaxrs.model.FunctionCodeInfo("enrgCommande", "ENRG_COMMANDE");
+        fci1.setDispatchPath("flux/action");
+        fci1.setInputFields(Arrays.asList("flux/numAccount", "flux/typeCommand", "flux/nbVignettes", "flux/quantite"));
+        fci1.setOutputFields(Arrays.asList("flux/numCommande"));
+        fci1.setHttpMethod(MethodInfo.HttpMethod.POST);
+
+        com.bank.tools.jaxrs.model.FunctionCodeInfo fci2 = new com.bank.tools.jaxrs.model.FunctionCodeInfo("suiviCommande", "SUIVI_COMMANDE");
+        fci2.setDispatchPath("flux/action");
+        fci2.setInputFields(Arrays.asList("flux/numAccount"));
+        fci2.setOutputFields(java.util.Collections.emptyList());
+        fci2.setHttpMethod(MethodInfo.HttpMethod.GET);
+
+        com.bank.tools.jaxrs.model.FunctionCodeInfo fci3 = new com.bank.tools.jaxrs.model.FunctionCodeInfo("suiviCommande_TST", "SUIVI_COMMANDE_TST");
+        fci3.setDispatchPath("flux/action");
+        fci3.setInputFields(Arrays.asList("flux/numAccount"));
+        fci3.setOutputFields(java.util.Collections.emptyList());
+        fci3.setHttpMethod(MethodInfo.HttpMethod.GET);
+        fci3.setTestFunction(true);
+
+        ejb.setFunctionCodes(Arrays.asList(fci1, fci2, fci3));
+        return ejb;
+    }
+
+    @Test
+    @DisplayName("V2: Resource utilise JNDI lookup au lieu de @EJB")
+    void testV2ResourceUsesJndiLookup() throws IOException {
+        EjbInfo ejb = createTestEjbWithFunctionCodes();
+        var meta = createTestSourceMetadata();
+
+        generator.generate(List.of(ejb), outputDir, java.util.Collections.emptyMap(), meta);
+
+        String content = readFirstResource();
+        assertTrue(content.contains("InitialContext"), "V2 Resource doit utiliser InitialContext");
+        assertTrue(content.contains("@PostConstruct"), "V2 Resource doit avoir @PostConstruct");
+        assertTrue(content.contains("ejb/CommandChequierService"), "V2 Resource doit utiliser le JNDI name réel");
+        assertFalse(content.contains("@EJB"), "V2 Resource ne doit PAS utiliser @EJB");
+    }
+
+    @Test
+    @DisplayName("V2: Resource génère un endpoint par code fonction")
+    void testV2ResourceGeneratesEndpointsPerFunctionCode() throws IOException {
+        EjbInfo ejb = createTestEjbWithFunctionCodes();
+        var meta = createTestSourceMetadata();
+
+        generator.generate(List.of(ejb), outputDir, java.util.Collections.emptyMap(), meta);
+
+        String content = readFirstResource();
+        assertTrue(content.contains("/enrg-commande"), "V2 doit générer endpoint enrg-commande");
+        assertTrue(content.contains("/suivi-commande"), "V2 doit générer endpoint suivi-commande");
+        assertTrue(content.contains("@POST"), "enrgCommande doit être @POST");
+        assertTrue(content.contains("@GET"), "suiviCommande doit être @GET");
+    }
+
+    @Test
+    @DisplayName("V2: GET avec <= 3 champs utilise @QueryParam")
+    void testV2GetUsesQueryParam() throws IOException {
+        EjbInfo ejb = createTestEjbWithFunctionCodes();
+        var meta = createTestSourceMetadata();
+
+        generator.generate(List.of(ejb), outputDir, java.util.Collections.emptyMap(), meta);
+
+        String content = readFirstResource();
+        assertTrue(content.contains("@QueryParam(\"numAccount\")"), "V2 GET doit utiliser @QueryParam");
+    }
+
+    @Test
+    @DisplayName("V2: Fonctions _TST génèrent des endpoints sous /test/")
+    void testV2TestFunctionsUnderTestPath() throws IOException {
+        EjbInfo ejb = createTestEjbWithFunctionCodes();
+        var meta = createTestSourceMetadata();
+
+        generator.generate(List.of(ejb), outputDir, java.util.Collections.emptyMap(), meta);
+
+        String content = readFirstResource();
+        assertTrue(content.contains("/test/suivi-commande"), "V2 _TST doit générer sous /test/");
+    }
+
+    @Test
+    @DisplayName("V2: Converter utilise le dispatch path réel")
+    void testV2ConverterUsesRealDispatchPath() throws IOException {
+        EjbInfo ejb = createTestEjbWithFunctionCodes();
+        var meta = createTestSourceMetadata();
+
+        generator.generate(List.of(ejb), outputDir, java.util.Collections.emptyMap(), meta);
+
+        String pkg = "ma/eai/boa/xbanking";
+        Path converterDir = outputDir.resolve(WEB_MODULE + "/src/main/java/" + pkg + "/converter");
+        String content = Files.readString(Files.list(converterDir).findFirst()
+                .orElseThrow(() -> new AssertionError("No converter file found")));
+
+        assertTrue(content.contains("\"flux/action\", \"enrgCommande\""), "V2 Converter doit utiliser le dispatch path avec le code fonction");
+        assertTrue(content.contains("\"flux/action\", \"suiviCommande\""), "V2 Converter doit utiliser le dispatch path pour suiviCommande");
+        assertTrue(content.contains("addNode("), "V2 Converter doit utiliser addNode");
+    }
+
+    @Test
+    @DisplayName("V2: Pas de module EJB généré quand sourceMetadata est fourni")
+    void testV2NoEjbModuleGenerated() throws IOException {
+        EjbInfo ejb = createTestEjbWithFunctionCodes();
+        var meta = createTestSourceMetadata();
+
+        generator.generate(List.of(ejb), outputDir, java.util.Collections.emptyMap(), meta);
+
+        assertFalse(Files.exists(outputDir.resolve(EJB_MODULE)), "V2 ne doit PAS générer de module EJB");
+        assertTrue(Files.exists(outputDir.resolve(WEB_MODULE + "/pom.xml")), "V2 doit générer le module Web");
+        assertTrue(Files.exists(outputDir.resolve(EAR_MODULE + "/pom.xml")), "V2 doit générer le module EAR");
+    }
+
+    @Test
+    @DisplayName("V2: DTOs générés pour chaque code fonction")
+    void testV2DtosGeneratedPerFunctionCode() throws IOException {
+        EjbInfo ejb = createTestEjbWithFunctionCodes();
+        var meta = createTestSourceMetadata();
+
+        generator.generate(List.of(ejb), outputDir, java.util.Collections.emptyMap(), meta);
+
+        String pkg = "ma/eai/boa/xbanking";
+        Path dtoDir = outputDir.resolve(WEB_MODULE + "/src/main/java/" + pkg + "/dto");
+        assertTrue(Files.exists(dtoDir.resolve("EnrgcommandeRequest.java")), "V2 doit générer EnrgcommandeRequest");
+        assertTrue(Files.exists(dtoDir.resolve("EnrgcommandeResponse.java")), "V2 doit générer EnrgcommandeResponse");
+        assertTrue(Files.exists(dtoDir.resolve("SuivicommandeRequest.java")), "V2 doit générer SuivicommandeRequest");
+        assertTrue(Files.exists(dtoDir.resolve("SuivicommandeResponse.java")), "V2 doit générer SuivicommandeResponse");
+    }
+
+    @Test
+    @DisplayName("V2: GET avec >3 champs bascule en @POST")
+    void testV2GetWithManyFieldsSwitchesToPost() throws IOException {
+        EjbInfo ejb = createTestEjb();
+
+        // Create a function code with GET + 5 input fields → should switch to POST
+        com.bank.tools.jaxrs.model.FunctionCodeInfo fci = new com.bank.tools.jaxrs.model.FunctionCodeInfo("rechercheAvancee", "RECHERCHE_AVANCEE");
+        fci.setDispatchPath("flux/action");
+        fci.setInputFields(Arrays.asList("flux/nom", "flux/prenom", "flux/dateNaissance", "flux/ville", "flux/codePostal"));
+        fci.setOutputFields(java.util.Collections.emptyList());
+        fci.setHttpMethod(MethodInfo.HttpMethod.GET);
+
+        ejb.setFunctionCodes(Arrays.asList(fci));
+        var meta = createTestSourceMetadata();
+
+        generator.generate(List.of(ejb), outputDir, java.util.Collections.emptyMap(), meta);
+
+        String content = readFirstResource();
+        // Should have switched to @POST because >3 input fields
+        assertTrue(content.contains("@POST"), "V2 GET avec >3 champs doit basculer en @POST");
+        assertFalse(content.contains("@GET"), "V2 GET avec >3 champs ne doit PAS rester @GET");
+        assertTrue(content.contains("RechercheavanceeRequest request"), "V2 doit utiliser un DTO body pour >3 champs");
+        assertFalse(content.contains("@QueryParam"), "V2 ne doit PAS utiliser @QueryParam pour >3 champs");
+    }
+
+    @Test
+    @DisplayName("V2: Pas de signature @author dans Resource, Converter et DTOs générés")
+    void testV2NoAuthorSignature() throws IOException {
+        EjbInfo ejb = createTestEjbWithFunctionCodes();
+        var meta = createTestSourceMetadata();
+
+        generator.generate(List.of(ejb), outputDir, java.util.Collections.emptyMap(), meta);
+
+        String pkg = "ma/eai/boa/xbanking";
+        // Check V2-specific files (Resource, Converter, DTOs) for absence of @author
+        Path[] v2Dirs = {
+            outputDir.resolve(WEB_MODULE + "/src/main/java/" + pkg + "/resource"),
+            outputDir.resolve(WEB_MODULE + "/src/main/java/" + pkg + "/converter"),
+            outputDir.resolve(WEB_MODULE + "/src/main/java/" + pkg + "/dto")
+        };
+        for (Path dir : v2Dirs) {
+            if (!Files.exists(dir)) continue;
+            Files.walk(dir)
+                    .filter(p -> p.toString().endsWith(".java"))
+                    .forEach(file -> {
+                        try {
+                            String content = Files.readString(file);
+                            assertFalse(content.contains("@author Générateur"),
+                                    "V2 ne doit pas contenir @author Générateur dans " + file.getFileName());
+                            assertFalse(content.contains("Generated by jaxrs-wrapper"),
+                                    "V2 ne doit pas contenir de signature outil dans " + file.getFileName());
+                        } catch (IOException e) {
+                            fail("Failed to read: " + e.getMessage());
+                        }
+                    });
+        }
+    }
+
     // ===== Utilitaires =====
 
     private String readFirstResource() throws IOException {
         String pkg = "ma/eai/boa/xbanking";
-        Path resourceDir = outputDir.resolve("src/main/java/" + pkg + "/resource");
+        Path resourceDir = outputDir.resolve(WEB_MODULE + "/src/main/java/" + pkg + "/resource");
         return Files.readString(Files.list(resourceDir).findFirst()
                 .orElseThrow(() -> new AssertionError("No resource file found")));
     }

@@ -53,6 +53,31 @@ public class EjbZipParser {
     );
 
     private final JavaParser javaParser = new JavaParser();
+    private final DtoClassParser dtoClassParser = new DtoClassParser();
+    private final FunctionCodeParser functionCodeParser = new FunctionCodeParser();
+    private final SourceProjectMetadataParser metadataParser = new SourceProjectMetadataParser();
+
+    /**
+     * Map des classes parsées dans le dernier projet analysé.
+     * Clé = nom simple de la classe, Valeur = métadonnées avec champs.
+     * Disponible après un appel à parse() ou parseDirectory().
+     */
+    private Map<String, DtoClassParser.ParsedClass> parsedClassMap = Collections.emptyMap();
+    private com.bank.tools.jaxrs.model.SourceProjectMetadata sourceMetadata;
+
+    /**
+     * Retourne la map des classes parsées lors du dernier appel à parse/parseDirectory.
+     */
+    public Map<String, DtoClassParser.ParsedClass> getParsedClassMap() {
+        return parsedClassMap;
+    }
+
+    /**
+     * Retourne les métadonnées du projet source (POM, JNDI bindings).
+     */
+    public com.bank.tools.jaxrs.model.SourceProjectMetadata getSourceMetadata() {
+        return sourceMetadata;
+    }
 
     /**
      * Parse un fichier .zip contenant un projet EJB.
@@ -78,6 +103,14 @@ public class EjbZipParser {
      */
     public List<EjbInfo> parseDirectory(Path projectDir) throws IOException {
         log.info("Scanning directory: {}", projectDir);
+
+        // Phase 0a: Extraire les métadonnées du projet source (POM, JNDI bindings)
+        this.sourceMetadata = metadataParser.parse(projectDir);
+        log.info("Source metadata: {}", sourceMetadata);
+
+        // Phase 0b: Scanner toutes les classes pour extraire les champs DTO/Entity
+        this.parsedClassMap = dtoClassParser.parseAllClasses(projectDir);
+        log.info("DtoClassParser found {} classes with fields", parsedClassMap.size());
 
         // Collecter tous les fichiers .java (hors src/test et target)
         List<Path> javaFiles;
@@ -152,16 +185,67 @@ public class EjbZipParser {
 
         List<EjbInfo> result = new ArrayList<>(interfaceMap.values());
 
-        // Déduire les méthodes HTTP
+        // Phase 8: Extraire les codes fonction depuis le corps de process()
+        // et stocker le corps complet de la classe pour le FunctionCodeParser
+        Map<String, String> fullClassBodies = new LinkedHashMap<>();
+        for (Path file : javaFiles) {
+            try {
+                String source = java.nio.file.Files.readString(file, java.nio.charset.StandardCharsets.UTF_8);
+                com.github.javaparser.ParseResult<com.github.javaparser.ast.CompilationUnit> pr = javaParser.parse(source);
+                if (pr.isSuccessful() && pr.getResult().isPresent()) {
+                    for (var decl : pr.getResult().get().findAll(com.github.javaparser.ast.body.ClassOrInterfaceDeclaration.class)) {
+                        if (!decl.isInterface()) {
+                            fullClassBodies.put(decl.getNameAsString(), source);
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                // ignore
+            }
+        }
+
         for (EjbInfo ejb : result) {
+            // Stocker le corps complet de la classe d'implémentation
+            if (ejb.getImplementationName() != null) {
+                String classBody = fullClassBodies.get(ejb.getImplementationName());
+                if (classBody != null) {
+                    ejb.setFullClassBody(classBody);
+                    // Extraire les codes fonction depuis le process() method body
+                    String processBody = null;
+                    for (MethodInfo method : ejb.getMethods()) {
+                        if ("process".equals(method.getName()) && method.hasMethodBody()) {
+                            processBody = method.getMethodBody();
+                            break;
+                        }
+                    }
+                    if (processBody != null) {
+                        var functionCodes = functionCodeParser.parse(processBody, classBody);
+                        ejb.setFunctionCodes(functionCodes);
+                        log.info("EJB {} has {} function codes", ejb.getInterfaceName(), functionCodes.size());
+                    }
+                }
+            }
+
+            // Déduire les méthodes HTTP
             for (MethodInfo method : ejb.getMethods()) {
                 if (method.getHttpMethod() == null) {
                     method.setHttpMethod(method.inferHttpMethod());
                 }
             }
-            // Déduire le JNDI name si absent
+
+            // Résoudre le JNDI name depuis les bindings du projet source
+            if (sourceMetadata != null && !sourceMetadata.getJndiBindings().isEmpty()) {
+                String implName = ejb.getImplementationName();
+                if (implName != null) {
+                    String jndi = sourceMetadata.getJndiNameForEjb(implName);
+                    if (jndi != null) {
+                        ejb.setJndiName(jndi);
+                    }
+                }
+            }
+            // Fallback JNDI
             if (ejb.getJndiName() == null || ejb.getJndiName().isBlank()) {
-                ejb.setJndiName("java:global/" + ejb.getInterfaceName());
+                ejb.setJndiName("ejb/" + ejb.getImplementationName());
             }
         }
 

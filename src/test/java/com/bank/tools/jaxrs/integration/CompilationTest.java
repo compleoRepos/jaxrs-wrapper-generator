@@ -103,22 +103,31 @@ class CompilationTest {
         Path outputDir = tempDir.resolve(projectName);
         JaxrsProjectGenerator generator = new JaxrsProjectGenerator(
                 "com.bank.api", "rest-api", "com.bank.api");
-        generator.generate(ejbs, outputDir);
+        generator.generate(ejbs, outputDir, parser.getParsedClassMap());
 
-        // Ajouter la dépendance stubs au POM
-        Path pom = outputDir.resolve("pom.xml");
-        assertTrue(Files.exists(pom), "POM not generated for " + projectName);
-        String pomContent = Files.readString(pom);
+        // Ajouter la dépendance stubs aux POMs EJB et Web
         String stubsDep = "        <dependency>\n" +
                 "            <groupId>ma.eai</groupId>\n" +
                 "            <artifactId>eai-stubs</artifactId>\n" +
                 "            <version>1.0.0</version>\n" +
                 "            <scope>provided</scope>\n" +
                 "        </dependency>\n    </dependencies>";
-        pomContent = pomContent.replace("</dependencies>", stubsDep);
-        Files.writeString(pom, pomContent);
 
-        // Compiler
+        // EJB module POM
+        Path ejbPom = outputDir.resolve("rest-api-ejb/pom.xml");
+        assertTrue(Files.exists(ejbPom), "EJB POM not generated for " + projectName);
+        String ejbPomContent = Files.readString(ejbPom);
+        ejbPomContent = ejbPomContent.replace("</dependencies>", stubsDep);
+        Files.writeString(ejbPom, ejbPomContent);
+
+        // Web module POM
+        Path webPom = outputDir.resolve("rest-api-web/pom.xml");
+        assertTrue(Files.exists(webPom), "Web POM not generated for " + projectName);
+        String pomContent = Files.readString(webPom);
+        pomContent = pomContent.replace("</dependencies>", stubsDep);
+        Files.writeString(webPom, pomContent);
+
+        // Compiler depuis le parent (reactor build complet: ejb puis web)
         Process process = new ProcessBuilder("mvn", "compile", "-q")
                 .directory(outputDir.toFile())
                 .redirectErrorStream(true)

@@ -16,6 +16,8 @@ public class EjbInfo {
     private String jndiName;
     private EjbType ejbType;
     private List<MethodInfo> methods = new ArrayList<>();
+    private List<FunctionCodeInfo> functionCodes = new ArrayList<>();
+    private String fullClassBody; // Corps complet de la classe d'implémentation
 
     public enum EjbType {
         STATELESS, STATEFUL, SINGLETON, MESSAGE_DRIVEN, WEBSERVICE
@@ -49,6 +51,13 @@ public class EjbInfo {
     public void setMethods(List<MethodInfo> methods) { this.methods = methods; }
 
     public void addMethod(MethodInfo method) { this.methods.add(method); }
+
+    public List<FunctionCodeInfo> getFunctionCodes() { return functionCodes; }
+    public void setFunctionCodes(List<FunctionCodeInfo> functionCodes) { this.functionCodes = functionCodes; }
+    public void addFunctionCode(FunctionCodeInfo fc) { this.functionCodes.add(fc); }
+
+    public String getFullClassBody() { return fullClassBody; }
+    public void setFullClassBody(String fullClassBody) { this.fullClassBody = fullClassBody; }
 
     /**
      * Déduit le nom REST resource à partir de l'interface.

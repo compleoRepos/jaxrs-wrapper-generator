@@ -80,24 +80,31 @@ class FullAuditTest {
         Path genDir = outputDir.resolve(name);
         JaxrsProjectGenerator generator = new JaxrsProjectGenerator(
                 "ma.eai.boa.xbanking", name + "-rest", "ma.eai.boa.xbanking");
-        generator.generate(ejbs, genDir);
+        generator.generate(ejbs, genDir, parser.getParsedClassMap());
 
         // Vérifications structurelles
-        assertTrue(Files.exists(genDir.resolve("pom.xml")), name + ": POM manquant");
+        String webModule = name + "-rest-web";
+        assertTrue(Files.exists(genDir.resolve("pom.xml")), name + ": POM parent manquant");
 
         String pom = Files.readString(genDir.resolve("pom.xml"));
         assertTrue(pom.contains("javaee-api"), name + ": POM doit contenir javaee-api (Java EE 7)");
         assertFalse(pom.contains("jakarta"), name + ": POM ne doit PAS contenir jakarta (Java EE 7 = javax)");
         assertTrue(pom.contains("<source>1.8</source>"), name + ": POM doit cibler Java 1.8");
+        assertTrue(pom.contains("<packaging>pom</packaging>"), name + ": Parent POM doit être pom");
 
-        Path resourceDir = genDir.resolve("src/main/java/ma/eai/boa/xbanking/resource");
+        // Vérifier modules
+        assertTrue(Files.exists(genDir.resolve(name + "-rest-ejb/pom.xml")), name + ": EJB POM manquant");
+        assertTrue(Files.exists(genDir.resolve(name + "-rest-ear/pom.xml")), name + ": EAR POM manquant");
+        assertTrue(Files.exists(genDir.resolve(webModule + "/pom.xml")), name + ": Web POM manquant");
+
+        Path resourceDir = genDir.resolve(webModule + "/src/main/java/ma/eai/boa/xbanking/resource");
         assertTrue(Files.exists(resourceDir), name + ": répertoire resource/ manquant");
         long resourceCount = Files.list(resourceDir).count();
         assertEquals(ejbs.size(), resourceCount, name + ": nombre de Resources != nombre d'EJBs");
 
-        // Pas de service layer
-        Path serviceDir = genDir.resolve("src/main/java/ma/eai/boa/xbanking/service");
-        assertFalse(Files.exists(serviceDir), name + ": service/ ne doit PAS exister");
+        // Pas de service layer dans le web module
+        Path serviceDir = genDir.resolve(webModule + "/src/main/java/ma/eai/boa/xbanking/service");
+        assertFalse(Files.exists(serviceDir), name + ": service/ ne doit PAS exister dans web");
 
         // Vérifier contenu des Resources (pattern adaptateur WAR)
         for (Path resFile : Files.list(resourceDir).toList()) {
@@ -115,7 +122,7 @@ class FullAuditTest {
         }
 
         // Vérifier DTOs
-        Path dtoDir = genDir.resolve("src/main/java/ma/eai/boa/xbanking/dto");
+        Path dtoDir = genDir.resolve(webModule + "/src/main/java/ma/eai/boa/xbanking/dto");
         assertTrue(Files.exists(dtoDir), name + ": répertoire dto/ manquant");
         assertTrue(Files.exists(dtoDir.resolve("ErrorResponse.java")), name + ": ErrorResponse.java manquant");
 

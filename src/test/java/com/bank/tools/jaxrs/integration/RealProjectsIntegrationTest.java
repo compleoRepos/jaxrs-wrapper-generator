@@ -74,19 +74,21 @@ class RealProjectsIntegrationTest {
 
         JaxrsProjectGenerator generator = new JaxrsProjectGenerator(
                 "ma.eai.boa.xbanking", "commande-chequier-rest", "ma.eai.boa.xbanking");
-        generator.generate(ejbs, outputDir);
+        generator.generate(ejbs, outputDir, parser.getParsedClassMap());
 
         // Validate structure
+        String webModule = "commande-chequier-rest-web";
         assertTrue(Files.exists(outputDir.resolve("pom.xml")));
         String pom = Files.readString(outputDir.resolve("pom.xml"));
         assertFalse(pom.contains("jakarta.ejb-api"), "POM should NOT have EJB dependency");
+        assertTrue(pom.contains("<packaging>pom</packaging>"), "Parent POM must be pom");
 
-        Path resourceDir = outputDir.resolve("src/main/java/ma/eai/boa/xbanking/resource");
+        Path resourceDir = outputDir.resolve(webModule + "/src/main/java/ma/eai/boa/xbanking/resource");
         assertTrue(Files.exists(resourceDir), "Resource directory should exist");
         assertTrue(Files.list(resourceDir).count() > 0, "Should have at least one Resource");
 
-        // No service layer
-        Path serviceDir = outputDir.resolve("src/main/java/ma/eai/boa/xbanking/service");
+        // No service layer in web module
+        Path serviceDir = outputDir.resolve(webModule + "/src/main/java/ma/eai/boa/xbanking/service");
         assertFalse(Files.exists(serviceDir), "Service layer should NOT exist");
     }
 
@@ -208,13 +210,15 @@ class RealProjectsIntegrationTest {
 
         JaxrsProjectGenerator generator = new JaxrsProjectGenerator(
                 "ma.eai.boa.xbanking", "virement-permanent-rest", "ma.eai.boa.xbanking");
-        generator.generate(ejbs, outputDir);
+        generator.generate(ejbs, outputDir, parser.getParsedClassMap());
 
+        String webModule = "virement-permanent-rest-web";
         assertTrue(Files.exists(outputDir.resolve("pom.xml")));
         String pom = Files.readString(outputDir.resolve("pom.xml"));
         assertFalse(pom.contains("jakarta.ejb-api"));
+        assertTrue(pom.contains("<packaging>pom</packaging>"), "Parent POM must be pom");
 
-        Path serviceDir = outputDir.resolve("src/main/java/ma/eai/boa/xbanking/service");
+        Path serviceDir = outputDir.resolve(webModule + "/src/main/java/ma/eai/boa/xbanking/service");
         assertFalse(Files.exists(serviceDir), "Service layer should NOT exist");
     }
 

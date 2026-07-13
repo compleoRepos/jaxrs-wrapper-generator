@@ -73,9 +73,9 @@ public class JaxrsGeneratorCli implements Callable<Integer> {
         }
         System.out.println();
 
-        // 2. Générer le projet JAX-RS
+        // 2. Générer le projet JAX-RS (avec résolution des types DTO)
         JaxrsProjectGenerator generator = new JaxrsProjectGenerator(groupId, artifactId, basePackage);
-        generator.generate(ejbs, output);
+        generator.generate(ejbs, output, parser.getParsedClassMap());
 
         System.out.println();
         System.out.println("✓ Projet JAX-RS généré avec succès dans: " + output);
