@@ -762,9 +762,13 @@ public class JaxrsProjectGenerator {
             pom.append("        <version>").append(meta.getParentVersion()).append("</version>\n");
             pom.append("    </parent>\n\n");
         }
-        pom.append("    <groupId>").append(groupId).append("</groupId>\n");
-        pom.append("    <artifactId>").append(artifactId).append("-pom</artifactId>\n");
-        pom.append("    <version>1.0.0-SNAPSHOT</version>\n");
+        // Use source project coordinates when available (Point 3+4)
+        String pomGroupId = meta.getSourceGroupId() != null ? meta.getSourceGroupId() : groupId;
+        String pomArtifactId = meta.getSourceArtifactId() != null ? meta.getSourceArtifactId() + "-rest" : artifactId + "-pom";
+        String pomVersion = meta.getSourceVersion() != null ? meta.getSourceVersion() : "1.0.0-SNAPSHOT";
+        pom.append("    <groupId>").append(pomGroupId).append("</groupId>\n");
+        pom.append("    <artifactId>").append(pomArtifactId).append("</artifactId>\n");
+        pom.append("    <version>").append(pomVersion).append("</version>\n");
         pom.append("    <packaging>pom</packaging>\n\n");
         pom.append("    <modules>\n");
         pom.append("        <module>").append(webModule).append("</module>\n");
@@ -792,20 +796,21 @@ public class JaxrsProjectGenerator {
         pom.append("                <version>7.0</version>\n");
         pom.append("                <scope>provided</scope>\n");
         pom.append("            </dependency>\n");
-        // EAI Commons
-        pom.append("            <dependency>\n");
-        pom.append("                <groupId>ma.eai.commons</groupId>\n");
-        pom.append("                <artifactId>eai-commons-services</artifactId>\n");
-        pom.append("                <version>1.0.0</version>\n");
-        pom.append("                <scope>provided</scope>\n");
-        pom.append("            </dependency>\n");
-        // EAI Middleware Connectors
-        pom.append("            <dependency>\n");
-        pom.append("                <groupId>ma.eai.midw</groupId>\n");
-        pom.append("                <artifactId>eai-midw-connectors</artifactId>\n");
-        pom.append("                <version>1.0.0</version>\n");
-        pom.append("                <scope>provided</scope>\n");
-        pom.append("            </dependency>\n");
+        // EAI libs: only declare explicitly when no parent POM (otherwise inherited)
+        if (!meta.hasParentPom()) {
+            pom.append("            <dependency>\n");
+            pom.append("                <groupId>ma.eai.commons</groupId>\n");
+            pom.append("                <artifactId>eai-commons-services</artifactId>\n");
+            pom.append("                <version>1.0.0</version>\n");
+            pom.append("                <scope>provided</scope>\n");
+            pom.append("            </dependency>\n");
+            pom.append("            <dependency>\n");
+            pom.append("                <groupId>ma.eai.midw</groupId>\n");
+            pom.append("                <artifactId>eai-midw-connectors</artifactId>\n");
+            pom.append("                <version>1.0.0</version>\n");
+            pom.append("                <scope>provided</scope>\n");
+            pom.append("            </dependency>\n");
+        }
         // SLF4J
         pom.append("            <dependency>\n");
         pom.append("                <groupId>org.slf4j</groupId>\n");
@@ -838,6 +843,11 @@ public class JaxrsProjectGenerator {
     private void generateEarModulePomV2(Path earModuleDir, String webModule, SourceProjectMetadata meta) throws IOException {
         Files.createDirectories(earModuleDir);
         String earArtifactId = artifactId + "-ear";
+        // Resolve parent coordinates (same as generateParentPomV2)
+        String pomGroupId = meta.getSourceGroupId() != null ? meta.getSourceGroupId() : groupId;
+        String pomParentArtifactId = meta.getSourceArtifactId() != null ? meta.getSourceArtifactId() + "-rest" : artifactId + "-pom";
+        String pomVersion = meta.getSourceVersion() != null ? meta.getSourceVersion() : "1.0.0-SNAPSHOT";
+
         StringBuilder pom = new StringBuilder();
         pom.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
         pom.append("<project xmlns=\"http://maven.apache.org/POM/4.0.0\"\n");
@@ -845,12 +855,17 @@ public class JaxrsProjectGenerator {
         pom.append("         xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd\">\n");
         pom.append("    <modelVersion>4.0.0</modelVersion>\n\n");
         pom.append("    <parent>\n");
-        pom.append("        <groupId>").append(groupId).append("</groupId>\n");
-        pom.append("        <artifactId>").append(artifactId).append("-pom</artifactId>\n");
-        pom.append("        <version>1.0.0-SNAPSHOT</version>\n");
+        pom.append("        <groupId>").append(pomGroupId).append("</groupId>\n");
+        pom.append("        <artifactId>").append(pomParentArtifactId).append("</artifactId>\n");
+        pom.append("        <version>").append(pomVersion).append("</version>\n");
         pom.append("    </parent>\n\n");
         pom.append("    <artifactId>").append(earArtifactId).append("</artifactId>\n");
         pom.append("    <packaging>ear</packaging>\n\n");
+        // WebSphere Traditional deployment properties (Point 7+8)
+        pom.append("    <properties>\n");
+        pom.append("        <was.deploy.prop>install</was.deploy.prop>\n");
+        pom.append("        <was_application_name>").append(earArtifactId).append("</was_application_name>\n");
+        pom.append("    </properties>\n\n");
         pom.append("    <build>\n");
         pom.append("        <plugins>\n");
         pom.append("            <plugin>\n");
@@ -904,6 +919,11 @@ public class JaxrsProjectGenerator {
     private void generateWebModulePomV2(Path webModuleDir, SourceProjectMetadata meta) throws IOException {
         Files.createDirectories(webModuleDir);
         String webArtifactId = artifactId + "-web";
+        // Resolve parent coordinates (same as generateParentPomV2)
+        String pomGroupId = meta.getSourceGroupId() != null ? meta.getSourceGroupId() : groupId;
+        String pomParentArtifactId = meta.getSourceArtifactId() != null ? meta.getSourceArtifactId() + "-rest" : artifactId + "-pom";
+        String pomVersion = meta.getSourceVersion() != null ? meta.getSourceVersion() : "1.0.0-SNAPSHOT";
+
         StringBuilder pom = new StringBuilder();
         pom.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
         pom.append("<project xmlns=\"http://maven.apache.org/POM/4.0.0\"\n");
@@ -911,9 +931,9 @@ public class JaxrsProjectGenerator {
         pom.append("         xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd\">\n");
         pom.append("    <modelVersion>4.0.0</modelVersion>\n\n");
         pom.append("    <parent>\n");
-        pom.append("        <groupId>").append(groupId).append("</groupId>\n");
-        pom.append("        <artifactId>").append(artifactId).append("-pom</artifactId>\n");
-        pom.append("        <version>1.0.0-SNAPSHOT</version>\n");
+        pom.append("        <groupId>").append(pomGroupId).append("</groupId>\n");
+        pom.append("        <artifactId>").append(pomParentArtifactId).append("</artifactId>\n");
+        pom.append("        <version>").append(pomVersion).append("</version>\n");
         pom.append("    </parent>\n\n");
         pom.append("    <artifactId>").append(webArtifactId).append("</artifactId>\n");
         pom.append("    <packaging>war</packaging>\n\n");
@@ -1338,6 +1358,7 @@ public class JaxrsProjectGenerator {
         sb.append("import javax.enterprise.context.ApplicationScoped;\n");
         sb.append("import javax.naming.InitialContext;\n");
         sb.append("import javax.naming.NamingException;\n");
+        sb.append("import ma.eai.commons.services.parsing.ParsingException;\n");
         sb.append("import javax.validation.Valid;\n");
         sb.append("import javax.validation.constraints.NotNull;\n");
         sb.append("import javax.ws.rs.*;\n");
@@ -1506,6 +1527,11 @@ public class JaxrsProjectGenerator {
         sb.append("            ").append(responseDtoName).append(" response = converter.from").append(dtoPrefix).append("Envelope(envelopeOut);\n");
         sb.append("            return Response.ok(response).build();\n");
         sb.append("\n");
+        sb.append("        } catch (ParsingException pe) {\n");
+        sb.append("            log.error(\"[").append(fci.getCode()).append("] Erreur de parsing Envelope\", pe);\n");
+        sb.append("            return Response.status(Response.Status.BAD_REQUEST)\n");
+        sb.append("                    .entity(new ErrorResponse(\"400\", \"Erreur de parsing: \" + pe.getMessage()))\n");
+        sb.append("                    .build();\n");
         sb.append("        } catch (Exception e) {\n");
         sb.append("            log.error(\"[").append(fci.getCode()).append("] Erreur inattendue\", e);\n");
         sb.append("            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)\n");
@@ -2306,50 +2332,38 @@ public class JaxrsProjectGenerator {
     // ===== Deployment files (Dockerfile, install_app, run-local) =====
 
     /**
-     * G\u00e9n\u00e8re un Dockerfile pour d\u00e9ployer le WAR sur WebSphere Liberty.
+     * Génère un Dockerfile pour déployer l'EAR sur WebSphere Application Server Traditional.
+     * Point 7+8: Cibler WAS Traditional (pas Liberty), déployer l'EAR complet.
      */
     private void generateDockerfile(Path webModuleDir) throws IOException {
-        String webArtifactId = artifactId + "-web";
+        String earArtifactId = artifactId + "-ear";
         StringBuilder df = new StringBuilder();
-        df.append("FROM websphere-liberty:24.0.0.6-javaee8\n\n");
-        df.append("# Configuration Liberty\n");
-        df.append("COPY --chown=1001:0 src/main/liberty/config/server.xml /config/server.xml\n\n");
-        df.append("# Copier les librairies partag\u00e9es (EAI commons)\n");
-        df.append("COPY --chown=1001:0 libs/ /config/lib/global/\n\n");
-        df.append("# Copier le WAR\n");
-        df.append("COPY --chown=1001:0 target/").append(webArtifactId).append(".war /config/apps/\n\n");
-        df.append("# Copier l'EAR si disponible\n");
-        df.append("# COPY --chown=1001:0 ../").append(artifactId).append("-ear/target/").append(artifactId).append("-ear.ear /config/apps/\n\n");
+        df.append("FROM ibmcom/websphere-traditional:latest\n\n");
+        df.append("# Variables d'environnement pour le déploiement\n");
+        df.append("ENV APP_NAME=").append(artifactId).append("\n");
+        df.append("ENV EAR_FILE=").append(earArtifactId).append(".ear\n\n");
+        df.append("# Copier l'EAR dans le répertoire de déploiement\n");
+        df.append("COPY ../").append(earArtifactId).append("/target/${EAR_FILE} /tmp/${EAR_FILE}\n\n");
+        df.append("# Script de déploiement via wsadmin\n");
+        df.append("COPY install_app.py /tmp/install_app.py\n\n");
+        df.append("# Installer l'application au démarrage du conteneur\n");
+        df.append("RUN /work/configure.sh\n\n");
         df.append("EXPOSE 9080 9443\n");
-        df.append("RUN configure.sh\n");
         Files.writeString(webModuleDir.resolve("Dockerfile"), df.toString());
 
-        // Also generate a minimal server.xml for Liberty
-        Path libertyConfig = webModuleDir.resolve("src/main/liberty/config");
-        Files.createDirectories(libertyConfig);
-        StringBuilder serverXml = new StringBuilder();
-        serverXml.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-        serverXml.append("<server description=\"").append(artifactId).append(" REST Adapter\">\n\n");
-        serverXml.append("    <featureManager>\n");
-        serverXml.append("        <feature>javaee-7.0</feature>\n");
-        serverXml.append("        <feature>jaxrs-2.0</feature>\n");
-        serverXml.append("        <feature>ejbLite-3.2</feature>\n");
-        serverXml.append("        <feature>jsonp-1.0</feature>\n");
-        serverXml.append("    </featureManager>\n\n");
-        serverXml.append("    <httpEndpoint id=\"defaultHttpEndpoint\"\n");
-        serverXml.append("                  host=\"*\"\n");
-        serverXml.append("                  httpPort=\"9080\"\n");
-        serverXml.append("                  httpsPort=\"9443\" />\n\n");
-        serverXml.append("    <application location=\"").append(webArtifactId).append(".war\"\n");
-        serverXml.append("                 context-root=\"/api\"\n");
-        serverXml.append("                 type=\"war\" />\n\n");
-        serverXml.append("    <library id=\"eaiLib\">\n");
-        serverXml.append("        <fileset dir=\"${server.config.dir}/lib/global\" includes=\"*.jar\" />\n");
-        serverXml.append("    </library>\n\n");
-        serverXml.append("</server>\n");
-        Files.writeString(libertyConfig.resolve("server.xml"), serverXml.toString());
+        // Generate wsadmin Jython install script (replaces Liberty server.xml)
+        StringBuilder installPy = new StringBuilder();
+        installPy.append("# Jython script for wsadmin — installs the EAR on WebSphere Traditional\n");
+        installPy.append("import os\n\n");
+        installPy.append("ear_path = '/tmp/" + earArtifactId + ".ear'\n");
+        installPy.append("app_name = '" + artifactId + "'\n\n");
+        installPy.append("print('[wsadmin] Installing ' + app_name + ' from ' + ear_path)\n");
+        installPy.append("AdminApp.install(ear_path, ['-appname', app_name, '-contextroot', '/api'])\n");
+        installPy.append("AdminConfig.save()\n");
+        installPy.append("print('[wsadmin] Installation complete')\n");
+        Files.writeString(webModuleDir.resolve("install_app.py"), installPy.toString());
 
-        // Create libs/ placeholder
+        // Create libs/ placeholder for shared EAI libraries
         Path libsDir = webModuleDir.resolve("libs");
         Files.createDirectories(libsDir);
         Files.writeString(libsDir.resolve(".gitkeep"), "# Place eai-commons-services.jar and eai-midw-connectors.jar here\n");
