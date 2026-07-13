@@ -2342,12 +2342,14 @@ public class JaxrsProjectGenerator {
         df.append("# Variables d'environnement pour le déploiement\n");
         df.append("ENV APP_NAME=").append(artifactId).append("\n");
         df.append("ENV EAR_FILE=").append(earArtifactId).append(".ear\n\n");
-        df.append("# Copier l'EAR dans le répertoire de déploiement\n");
-        df.append("COPY ../").append(earArtifactId).append("/target/${EAR_FILE} /tmp/${EAR_FILE}\n\n");
+        df.append("# Copier l'EAR (build context = racine du projet multi-modules)\n");
+        df.append("# docker build -f ").append(artifactId).append("-web/Dockerfile .\n");
+        df.append("COPY ").append(earArtifactId).append("/target/${EAR_FILE} /tmp/${EAR_FILE}\n\n");
         df.append("# Script de déploiement via wsadmin\n");
-        df.append("COPY install_app.py /tmp/install_app.py\n\n");
-        df.append("# Installer l'application au démarrage du conteneur\n");
-        df.append("RUN /work/configure.sh\n\n");
+        df.append("COPY ").append(artifactId).append("-web/install_app.py /tmp/install_app.py\n\n");
+        df.append("# Démarrer WAS et installer l'application via wsadmin\n");
+        df.append("RUN /work/configure.sh && \\\n");
+        df.append("    /opt/IBM/WebSphere/AppServer/bin/wsadmin.sh -conntype NONE -lang jython -f /tmp/install_app.py\n\n");
         df.append("EXPOSE 9080 9443\n");
         Files.writeString(webModuleDir.resolve("Dockerfile"), df.toString());
 
