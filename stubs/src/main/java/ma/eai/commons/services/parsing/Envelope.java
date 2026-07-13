@@ -12,6 +12,7 @@ public class Envelope implements Serializable {
 
     private static final long serialVersionUID = 1L;
     private final Map<String, String> nodes = new HashMap<String, String>();
+    private String body;
 
     public Envelope() {
     }
@@ -21,6 +22,10 @@ public class Envelope implements Serializable {
     }
 
     public String getNodeAsString(String path) {
+        return nodes.get(path);
+    }
+
+    public String getLNodeAsString(String path) {
         return nodes.get(path);
     }
 
@@ -45,6 +50,14 @@ public class Envelope implements Serializable {
     public boolean getNodeAsBoolean(String path) {
         String val = nodes.get(path);
         return "true".equalsIgnoreCase(val) || "1".equals(val);
+    }
+
+    public void setBody(String body) {
+        this.body = body;
+    }
+
+    public String getBody() {
+        return body;
     }
 
     public Map<String, String> getAllNodes() {

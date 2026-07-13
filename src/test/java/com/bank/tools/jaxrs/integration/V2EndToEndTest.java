@@ -294,7 +294,7 @@ class V2EndToEndTest {
 
         String converterContent = Files.readString(converters.get(0));
         assertTrue(converterContent.contains("Envelope"), "Converter should reference Envelope");
-        assertTrue(converterContent.contains("addNode"), "Converter should use addNode for Envelope construction");
+        assertTrue(converterContent.contains("setBody"), "Converter should use setBody for XML Envelope construction");
 
         // Verify DTOs
         Path dtoDir = webDir.resolve("src/main/java/" + pkg + "/dto");

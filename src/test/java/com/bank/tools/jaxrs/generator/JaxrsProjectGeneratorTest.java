@@ -451,9 +451,10 @@ class JaxrsProjectGeneratorTest {
         String content = Files.readString(Files.list(converterDir).findFirst()
                 .orElseThrow(() -> new AssertionError("No converter file found")));
 
-        assertTrue(content.contains("\"flux/action\", \"enrgCommande\""), "V2 Converter doit utiliser le dispatch path avec le code fonction");
-        assertTrue(content.contains("\"flux/action\", \"suiviCommande\""), "V2 Converter doit utiliser le dispatch path pour suiviCommande");
-        assertTrue(content.contains("addNode("), "V2 Converter doit utiliser addNode");
+        assertTrue(content.contains("setBody("), "V2 Converter doit utiliser setBody pour construire le corps XML");
+        assertTrue(content.contains("<action>enrgCommande</action>"), "V2 Converter doit inclure le code fonction dans le XML");
+        assertTrue(content.contains("<action>suiviCommande</action>"), "V2 Converter doit inclure suiviCommande dans le XML");
+        assertTrue(content.contains("<Flux>"), "V2 Converter doit construire un corps XML avec racine <Flux>");
     }
 
     @Test

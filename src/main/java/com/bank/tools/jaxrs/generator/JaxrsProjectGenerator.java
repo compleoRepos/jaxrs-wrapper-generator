@@ -949,16 +949,8 @@ public class JaxrsProjectGenerator {
         pom.append("            <artifactId>").append(meta.getEjbArtifactId()).append("</artifactId>\n");
         pom.append("            <scope>provided</scope>\n");
         pom.append("        </dependency>\n\n");
-        // EAI Commons (Envelope, Parser)
-        pom.append("        <dependency>\n");
-        pom.append("            <groupId>ma.eai.commons</groupId>\n");
-        pom.append("            <artifactId>eai-commons-services</artifactId>\n");
-        pom.append("        </dependency>\n\n");
-        // EAI Middleware Connectors (SynchroneService)
-        pom.append("        <dependency>\n");
-        pom.append("            <groupId>ma.eai.midw</groupId>\n");
-        pom.append("            <artifactId>eai-midw-connectors</artifactId>\n");
-        pom.append("        </dependency>\n\n");
+        // EAI Commons et Middleware Connectors sont hérités du parent POM (general-settings-vega)
+        // Pas besoin de les déclarer ici — ils viennent via le dependencyManagement du super-pom
         // SLF4J
         pom.append("        <dependency>\n");
         pom.append("            <groupId>org.slf4j</groupId>\n");
@@ -1626,6 +1618,9 @@ public class JaxrsProjectGenerator {
             sb.append("    /** Champ de r\u00e9ponse extrait depuis Envelope path: ").append(field.getPath()).append(" */\n");
             sb.append("    private ").append(javaType(field.getType())).append(" ").append(field.getFieldName()).append(";\n\n");
         }
+        // Champ rawBody pour le repli (Point 11: si les noeuds sont vides, conserver le corps brut)
+        sb.append("    /** Corps brut de l'Envelope (repli si les n\u0153uds sont vides) */\n");
+        sb.append("    private String rawBody;\n\n");
         sb.append("\n");
         sb.append("    public ").append(className).append("() {\n");
         sb.append("    }\n\n");
@@ -1639,6 +1634,13 @@ public class JaxrsProjectGenerator {
             sb.append("        this.").append(field.getFieldName()).append(" = ").append(field.getFieldName()).append(";\n");
             sb.append("    }\n\n");
         }
+        // rawBody getter/setter (Point 11 fallback)
+        sb.append("    public String getRawBody() {\n");
+        sb.append("        return rawBody;\n");
+        sb.append("    }\n\n");
+        sb.append("    public void setRawBody(String rawBody) {\n");
+        sb.append("        this.rawBody = rawBody;\n");
+        sb.append("    }\n\n");
         sb.append("}\n");
         Files.writeString(dtoDir.resolve(className + ".java"), sb.toString());
     }
@@ -1872,9 +1874,10 @@ public class JaxrsProjectGenerator {
         boolean isSimpleGet = httpMethod == MethodInfo.HttpMethod.GET && fciInputFields.size() <= 3;
 
         if (isSimpleGet && !fciInputFields.isEmpty()) {
-            // toEnvelope with individual parameters (for @GET @QueryParam)
+            // toEnvelope with individual parameters (for @GET @QueryParam) — setBody with XML <Flux>
             sb.append("    /**\n");
             sb.append("     * Construit l'Envelope pour le code fonction '").append(functionCode).append("'.\n");
+            sb.append("     * Le corps XML est construit au format attendu par l'EJB : {@code <Flux><FONCTION>...</FONCTION>...</Flux>}\n");
             sb.append("     */\n");
             sb.append("    public Envelope toEnvelope").append(dtoPrefix).append("(");
             for (int i = 0; i < fciInputFields.size(); i++) {
@@ -1884,41 +1887,55 @@ public class JaxrsProjectGenerator {
             }
             sb.append(") {\n");
             sb.append("        Envelope envelope = new Envelope();\n");
-            sb.append("        envelope.addNode(\"").append(dispatchPath).append("\", \"").append(functionCode).append("\");\n");
+            sb.append("        StringBuilder xml = new StringBuilder(\"<Flux>\");\n");
+            // Extract the XML element name from the dispatch path (e.g. "Flux/FONCTION" -> "FONCTION")
+            String dispatchElement = dispatchPath.contains("/") ? dispatchPath.substring(dispatchPath.lastIndexOf('/') + 1) : dispatchPath;
+            sb.append("        xml.append(\"<").append(dispatchElement).append(">").append(functionCode).append("</").append(dispatchElement).append(">\");\n");
             for (String fieldPath : fciInputFields) {
                 String fieldName = extractFieldName(fieldPath);
-                sb.append("        envelope.addNode(\"").append(fieldPath).append("\", ").append(fieldName).append(");\n");
+                String xmlElement = fieldPath.contains("/") ? fieldPath.substring(fieldPath.lastIndexOf('/') + 1) : fieldPath;
+                sb.append("        xml.append(\"<").append(xmlElement).append(">\").append(InputSanitizer.sanitize(").append(fieldName).append(")).append(\"</").append(xmlElement).append(">\");\n");
             }
+            sb.append("        xml.append(\"</Flux>\");\n");
+            sb.append("        envelope.setBody(xml.toString());\n");
             sb.append("        return envelope;\n");
             sb.append("    }\n\n");
         } else if (isSimpleGet && fciInputFields.isEmpty()) {
-            // toEnvelope without parameters
+            // toEnvelope without parameters — setBody with minimal <Flux>
             sb.append("    /**\n");
             sb.append("     * Cr\u00e9e un Envelope pour le code fonction '").append(functionCode).append("' (sans param\u00e8tres).\n");
+            sb.append("     * Le corps XML est construit au format attendu par l'EJB : {@code <Flux><FONCTION>...</FONCTION></Flux>}\n");
             sb.append("     */\n");
             sb.append("    public Envelope toEnvelope").append(dtoPrefix).append("() {\n");
             sb.append("        Envelope envelope = new Envelope();\n");
-            sb.append("        envelope.addNode(\"").append(dispatchPath).append("\", \"").append(functionCode).append("\");\n");
+            String dispatchElement0 = dispatchPath.contains("/") ? dispatchPath.substring(dispatchPath.lastIndexOf('/') + 1) : dispatchPath;
+            sb.append("        envelope.setBody(\"<Flux><").append(dispatchElement0).append(">").append(functionCode).append("</").append(dispatchElement0).append("></Flux>\");\n");
             sb.append("        return envelope;\n");
             sb.append("    }\n\n");
         } else {
-            // toEnvelope with DTO (for @POST/@PUT/@DELETE or GET with > 3 params)
+            // toEnvelope with DTO (for @POST/@PUT/@DELETE or GET with > 3 params) — setBody with XML <Flux>
             sb.append("    /**\n");
             sb.append("     * Convertit le DTO ").append(requestDtoName).append(" en Envelope pour le code fonction '").append(functionCode).append("'.\n");
+            sb.append("     * Le corps XML est construit au format attendu par l'EJB : {@code <Flux><FONCTION>...</FONCTION>...</Flux>}\n");
             sb.append("     */\n");
             sb.append("    public Envelope toEnvelope").append(dtoPrefix).append("(").append(requestDtoName).append(" request) {\n");
             sb.append("        Envelope envelope = new Envelope();\n");
-            sb.append("        envelope.addNode(\"").append(dispatchPath).append("\", \"").append(functionCode).append("\");\n");
+            sb.append("        StringBuilder xml = new StringBuilder(\"<Flux>\");\n");
+            String dispatchElementDto = dispatchPath.contains("/") ? dispatchPath.substring(dispatchPath.lastIndexOf('/') + 1) : dispatchPath;
+            sb.append("        xml.append(\"<").append(dispatchElementDto).append(">").append(functionCode).append("</").append(dispatchElementDto).append(">\");\n");
             for (EnvelopeField field : fields) {
                 String getter = "request.get" + capitalize(field.getFieldName()) + "()";
+                String xmlElement = field.getPath().contains("/") ? field.getPath().substring(field.getPath().lastIndexOf('/') + 1) : field.getPath();
                 if ("int".equals(field.getType()) || "boolean".equals(field.getType())
                         || "long".equals(field.getType()) || "double".equals(field.getType())
                         || "float".equals(field.getType()) || "short".equals(field.getType())) {
-                    sb.append("        envelope.addNode(\"").append(field.getPath()).append("\", String.valueOf(").append(getter).append("));\n");
+                    sb.append("        xml.append(\"<").append(xmlElement).append(">\").append(").append(getter).append(").append(\"</").append(xmlElement).append(">\");\n");
                 } else {
-                    sb.append("        envelope.addNode(\"").append(field.getPath()).append("\", InputSanitizer.sanitize(").append(getter).append("));\n");
+                    sb.append("        xml.append(\"<").append(xmlElement).append(">\").append(InputSanitizer.sanitize(").append(getter).append(")).append(\"</").append(xmlElement).append(">\");\n");
                 }
             }
+            sb.append("        xml.append(\"</Flux>\");\n");
+            sb.append("        envelope.setBody(xml.toString());\n");
             sb.append("        return envelope;\n");
             sb.append("    }\n\n");
         }
@@ -1930,6 +1947,9 @@ public class JaxrsProjectGenerator {
 
         sb.append("    /**\n");
         sb.append("     * Convertit l'Envelope de r\u00e9ponse en DTO ").append(responseDtoName).append(".\n");
+        sb.append("     *\n");
+        sb.append("     * <p>Localise les champs dans les n\u0153uds de l'Envelope. Si les n\u0153uds sont vides,\n");
+        sb.append("     * le corps brut (getBody) est conserv\u00e9 dans le champ {@code rawBody} comme repli.</p>\n");
         sb.append("     */\n");
         sb.append("    public ").append(responseDtoName).append(" from").append(dtoPrefix).append("Envelope(Envelope envelope) {\n");
         sb.append("        ").append(responseDtoName).append(" response = new ").append(responseDtoName).append("();\n");
@@ -1949,6 +1969,12 @@ public class JaxrsProjectGenerator {
                 sb.append("        ").append(setter).append("(envelope.getNodeAsString(\"").append(field.getPath()).append("\"));\n");
             }
         }
+
+        // Fallback: si les noeuds sont vides, conserver le corps brut pour d\u00e9bogage
+        sb.append("        // Repli : si le corps brut contient des donn\u00e9es non mapp\u00e9es\n");
+        sb.append("        if (response.getCode() == null && envelope.getBody() != null) {\n");
+        sb.append("            response.setRawBody(envelope.getBody());\n");
+        sb.append("        }\n");
 
         sb.append("        return response;\n");
         sb.append("    }\n\n");
