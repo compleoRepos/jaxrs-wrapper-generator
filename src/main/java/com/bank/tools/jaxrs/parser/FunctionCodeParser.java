@@ -6,6 +6,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.*;
+import java.util.stream.Collectors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -264,6 +265,352 @@ public class FunctionCodeParser {
         }
 
         return result;
+    }
+
+    /**
+     * Strategy 2: Parse function codes when the enum and/or switch are in external classes.
+     * Handles patterns like:
+     * - fatourati: process() delegates to Traitement(), enum Action in same class, dispatch via Utility class
+     * - virement: process() calls Utilities.getServiceName(), enum ActionWeb in separate file with constructor values
+     *
+     * @param processBody    the process() method body
+     * @param classBody      the full class source
+     * @param allClassBodies map of className → full source for all classes in the project
+     * @return list of function codes detected
+     */
+    public List<FunctionCodeInfo> parseWithExternalClasses(String processBody, String classBody, Map<String, String> allClassBodies) {
+        if (processBody == null || processBody.isBlank()) {
+            return Collections.emptyList();
+        }
+
+        // Merge all constants from the main class and all external classes
+        Map<String, String> allConstants = new HashMap<>();
+        allConstants.putAll(extractConstants(classBody != null ? classBody : ""));
+        for (String extSource : allClassBodies.values()) {
+            allConstants.putAll(extractConstants(extSource));
+        }
+
+        // Step 1: Find the dispatch path from process() or delegated methods
+        String dispatchPath = detectDispatchPathExternal(processBody, classBody, allClassBodies, allConstants);
+        log.debug("[External] Detected dispatch path: {}", dispatchPath);
+
+        // Step 2: Find the switch body - either in process() or in a delegated method
+        String switchBody = findSwitchBody(processBody, classBody);
+        if (switchBody == null || switchBody.isBlank()) {
+            log.debug("[External] No switch found in process() or delegated methods");
+            return Collections.emptyList();
+        }
+
+        // Step 3: Find enum references in the switch to identify the enum class
+        String enumClassName = detectEnumClassName(switchBody, allClassBodies);
+        if (enumClassName == null) {
+            log.debug("[External] No enum class reference found in switch");
+            return Collections.emptyList();
+        }
+        log.debug("[External] Enum class: {}", enumClassName);
+
+        // Step 4: Find the enum source (in classBody or external)
+        String enumSource = null;
+        if (classBody != null && classBody.contains("enum " + enumClassName)) {
+            enumSource = classBody;
+        } else {
+            enumSource = allClassBodies.get(enumClassName);
+        }
+        if (enumSource == null) {
+            log.debug("[External] Enum source not found for: {}", enumClassName);
+            return Collections.emptyList();
+        }
+
+        // Step 5: Extract enum values - detect if constructor-valued or simple
+        List<String> functionCodes = extractEnumFunctionCodes(enumSource, enumClassName);
+        log.debug("[External] Extracted {} function codes from enum {}", functionCodes.size(), enumClassName);
+
+        if (functionCodes.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        // Step 6: Build FunctionCodeInfo for each code
+        // Try to extract input/output fields from the switch cases
+        Map<String, List<String>> inputFieldsByCase = extractFieldsByCase(switchBody, allConstants);
+        Map<String, List<String>> outputFieldsByCase = extractOutputFieldsByCase(switchBody, allConstants);
+
+        List<FunctionCodeInfo> result = new ArrayList<>();
+        for (String code : functionCodes) {
+            FunctionCodeInfo fci = new FunctionCodeInfo(code, code.toUpperCase().replace("-", "_"));
+            fci.setDispatchPath(dispatchPath);
+
+            // Try to find fields for this case (match by enum constant name or code value)
+            String enumConstant = findEnumConstantForCode(enumSource, enumClassName, code);
+            List<String> inputs = inputFieldsByCase.get(enumConstant);
+            if (inputs == null) inputs = inputFieldsByCase.get(code);
+            if (inputs != null) fci.setInputFields(inputs);
+
+            List<String> outputs = outputFieldsByCase.get(enumConstant);
+            if (outputs == null) outputs = outputFieldsByCase.get(code);
+            if (outputs != null) fci.setOutputFields(outputs);
+
+            fci.setHttpMethod(fci.inferHttpMethod());
+            result.add(fci);
+        }
+
+        log.info("[External] Parsed {} function codes from external enum {}", result.size(), enumClassName);
+        return result;
+    }
+
+    /**
+     * Detect dispatch path by looking in process(), delegated methods, and utility classes.
+     */
+    private String detectDispatchPathExternal(String processBody, String classBody,
+                                              Map<String, String> allClassBodies, Map<String, String> allConstants) {
+        // First try in process() itself
+        String path = detectDispatchPath(processBody, allConstants);
+        if (path != null && !path.equals("Flux/FONCTION")) {
+            return path;
+        }
+
+        // Look in the full class body (other methods like Traitement)
+        if (classBody != null) {
+            // Find getNodeAsString calls that feed into valueOf/fromValue
+            Pattern utilityCall = Pattern.compile(
+                    "(?:valueOf|fromValue)\\(.*?getNodeAsString\\(\\s*(?:\"([^\"]+)\"|([A-Z_]+))\\s*\\)");
+            Matcher m = utilityCall.matcher(classBody);
+            if (m.find()) {
+                if (m.group(1) != null) return m.group(1);
+                if (m.group(2) != null) return allConstants.getOrDefault(m.group(2), m.group(2));
+            }
+        }
+
+        // Look in external utility classes
+        for (String extSource : allClassBodies.values()) {
+            Pattern utilityCall = Pattern.compile(
+                    "(?:valueOf|fromValue)\\(.*?getNodeAsString\\(\\s*(?:\"([^\"]+)\"|([A-Z_]+))\\s*\\)");
+            Matcher m = utilityCall.matcher(extSource);
+            if (m.find()) {
+                if (m.group(1) != null) return m.group(1);
+                if (m.group(2) != null) {
+                    // Resolve constant from the same external class
+                    Map<String, String> extConstants = extractConstants(extSource);
+                    String resolved = extConstants.get(m.group(2));
+                    if (resolved != null) return resolved;
+                    return allConstants.getOrDefault(m.group(2), m.group(2));
+                }
+            }
+
+            // Also look for getNodeAsString feeding into a variable that's used with valueOf
+            Pattern directRead = Pattern.compile(
+                    "getNodeAsString\\(\\s*(?:\"([^\"]+)\"|([A-Z_]+))\\s*\\)");
+            Matcher dm = directRead.matcher(extSource);
+            while (dm.find()) {
+                String p = dm.group(1) != null ? dm.group(1) : allConstants.getOrDefault(dm.group(2), dm.group(2));
+                if (p != null && (p.contains("action") || p.contains("Action") || p.contains("fonction") || p.contains("FONCTION"))) {
+                    return p;
+                }
+            }
+        }
+
+        return "flux/action"; // default for external dispatch
+    }
+
+    /**
+     * Find the switch body - either directly in process() or in a delegated method.
+     */
+    private String findSwitchBody(String processBody, String classBody) {
+        // Check if process() itself has a switch
+        if (processBody.contains("switch")) {
+            return processBody;
+        }
+
+        // Look for method calls in process() that might contain the switch
+        // Pattern: methodName(envIn) or methodName(envelope)
+        Pattern methodCall = Pattern.compile("(?:=\\s*)?([A-Z]\\w+)\\s*\\(\\s*(?:envIn|envelope|env)\\s*\\)");
+        Matcher m = methodCall.matcher(processBody);
+        while (m.find()) {
+            String methodName = m.group(1);
+            // Find this method in the class body
+            if (classBody != null) {
+                Pattern methodDef = Pattern.compile(
+                        "(?:public|private|protected)\\s+\\w+\\s+" + Pattern.quote(methodName) + "\\s*\\([^)]*\\)\\s*(?:throws[^{]*)?\\{(.*)",
+                        Pattern.DOTALL);
+                Matcher mm = methodDef.matcher(classBody);
+                if (mm.find()) {
+                    String body = extractMethodBody(mm.group(1));
+                    if (body != null && body.contains("switch")) {
+                        return body;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Extract balanced method body from the start of a method (after the opening brace).
+     */
+    private String extractMethodBody(String afterOpenBrace) {
+        int depth = 1;
+        int i = 0;
+        while (i < afterOpenBrace.length() && depth > 0) {
+            char c = afterOpenBrace.charAt(i);
+            if (c == '{') depth++;
+            else if (c == '}') depth--;
+            i++;
+        }
+        return i > 0 ? afterOpenBrace.substring(0, i - 1) : null;
+    }
+
+    /**
+     * Detect the enum class name from switch case references.
+     */
+    private String detectEnumClassName(String switchBody) {
+        return detectEnumClassName(switchBody, null);
+    }
+
+    /**
+     * Detect the enum class name from switch case references, with access to all class bodies.
+     */
+    private String detectEnumClassName(String switchBody, Map<String, String> allClassBodies) {
+        // Pattern 1: case EnumClass.CONSTANT or EnumClass.CONSTANT:
+        Pattern enumRef = Pattern.compile("case\\s+(\\w+)\\.(\\w+)\\s*:");
+        Matcher m = enumRef.matcher(switchBody);
+        if (m.find()) {
+            return m.group(1);
+        }
+
+        // Pattern 2: switch (variable) where variable is typed as EnumClass
+        Pattern switchVar = Pattern.compile("switch\\s*\\(\\s*(\\w+)\\s*\\)");
+        Matcher sv = switchVar.matcher(switchBody);
+        if (sv.find()) {
+            String varName = sv.group(1);
+            // Find type declaration: EnumClass varName = ...
+            Pattern typeDecl = Pattern.compile("(\\w+)\\s+" + Pattern.quote(varName) + "\\s*=");
+            Matcher td = typeDecl.matcher(switchBody);
+            if (td.find()) {
+                String typeName = td.group(1);
+                if (!typeName.equals("String") && !typeName.equals("int") && !typeName.equals("var")) {
+                    return typeName;
+                }
+            }
+        }
+
+        // Pattern 3: bare ALL_CAPS enum constants - collect case labels and search allClassBodies for matching enum
+        if (allClassBodies != null && !allClassBodies.isEmpty()) {
+            Pattern bareCase = Pattern.compile("case\\s+([A-Z][A-Z0-9_]+)\\s*:");
+            Matcher bc = bareCase.matcher(switchBody);
+            Set<String> caseLabels = new LinkedHashSet<>();
+            while (bc.find()) {
+                caseLabels.add(bc.group(1));
+            }
+            if (!caseLabels.isEmpty()) {
+                // Search all class bodies for an enum that contains at least 2 of these labels
+                for (Map.Entry<String, String> entry : allClassBodies.entrySet()) {
+                    String className = entry.getKey();
+                    String source = entry.getValue();
+                    if (source.contains("enum " + className) || source.contains("enum\t" + className)) {
+                        int matchCount = 0;
+                        for (String label : caseLabels) {
+                            if (source.contains(label)) matchCount++;
+                        }
+                        if (matchCount >= 2 || (matchCount >= 1 && caseLabels.size() <= 2)) {
+                            log.debug("[detectEnumClassName] Found enum {} matching {} of {} case labels",
+                                    className, matchCount, caseLabels.size());
+                            return className;
+                        }
+                    }
+                }
+                // Also search in classBody for inner enums
+                // Pattern: enum SomeName { LABEL1, LABEL2 }
+                Pattern innerEnum = Pattern.compile("enum\\s+(\\w+)\\s*\\{([^}]+)\\}");
+                for (Map.Entry<String, String> entry : allClassBodies.entrySet()) {
+                    Matcher ie = innerEnum.matcher(entry.getValue());
+                    while (ie.find()) {
+                        String enumName = ie.group(1);
+                        String enumBody = ie.group(2);
+                        int matchCount = 0;
+                        for (String label : caseLabels) {
+                            if (enumBody.contains(label)) matchCount++;
+                        }
+                        if (matchCount >= 2 || (matchCount >= 1 && caseLabels.size() <= 2)) {
+                            log.debug("[detectEnumClassName] Found inner enum {} matching {} labels", enumName, matchCount);
+                            return enumName;
+                        }
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Extract function codes from an enum source.
+     * Handles both simple enums (CONST1, CONST2) and constructor-valued enums (CONST1("value1")).
+     */
+    private List<String> extractEnumFunctionCodes(String enumSource, String enumClassName) {
+        List<String> codes = new ArrayList<>();
+
+        // Find the enum body
+        Pattern enumBodyPat = Pattern.compile(
+                "enum\\s+" + Pattern.quote(enumClassName) + "\\s*\\{([^;]*(?:;|\\}))",
+                Pattern.DOTALL);
+        Matcher m = enumBodyPat.matcher(enumSource);
+        if (!m.find()) {
+            // Try simpler pattern
+            Pattern simple = Pattern.compile("enum\\s+" + Pattern.quote(enumClassName) + "\\s*\\{([^}]+)\\}", Pattern.DOTALL);
+            m = simple.matcher(enumSource);
+            if (!m.find()) return codes;
+        }
+
+        String enumBody = m.group(1).trim();
+        // Remove trailing semicolon if present
+        if (enumBody.endsWith(";")) enumBody = enumBody.substring(0, enumBody.length() - 1).trim();
+
+        // Check if constructor-valued: look for pattern CONST("value")
+        boolean isConstructorValued = enumBody.contains("(\"");
+
+        if (isConstructorValued) {
+            // Extract constructor values: CONST_NAME("actualValue")
+            Pattern constPat = Pattern.compile("(\\w+)\\s*\\(\\s*\"([^\"]+)\"\\s*\\)");
+            Matcher cm = constPat.matcher(enumBody);
+            while (cm.find()) {
+                codes.add(cm.group(2)); // Use the constructor value as the function code
+            }
+        } else {
+            // Simple enum: constant names are the codes
+            // First, strip single-line comments (// ...) to handle inline comments after commas
+            String cleanedBody = enumBody.replaceAll("//[^\\n]*", "");
+            for (String line : cleanedBody.split(",")) {
+                String trimmed = line.trim();
+                if (trimmed.isEmpty() || trimmed.startsWith("@")) continue;
+                // Extract just the constant name (first word token)
+                Pattern constName = Pattern.compile("^([A-Z]\\w*)");
+                Matcher cn = constName.matcher(trimmed);
+                if (cn.find()) {
+                    String name = cn.group(1);
+                    if (!name.isEmpty() && !name.equals("private") && !name.equals("public")) {
+                        codes.add(name);
+                    }
+                }
+            }
+        }
+
+        return codes;
+    }
+
+    /**
+     * Find the enum constant name that corresponds to a given function code value.
+     * For simple enums, the constant name IS the code.
+     * For constructor-valued enums, we need to find which constant has that value.
+     */
+    private String findEnumConstantForCode(String enumSource, String enumClassName, String code) {
+        // Check if it's a constructor-valued enum
+        Pattern constPat = Pattern.compile("(\\w+)\\s*\\(\\s*\"" + Pattern.quote(code) + "\"\\s*\\)");
+        Matcher m = constPat.matcher(enumSource);
+        if (m.find()) {
+            return m.group(1); // Return the constant name
+        }
+        // For simple enums, the code IS the constant name
+        return code;
     }
 
     /**

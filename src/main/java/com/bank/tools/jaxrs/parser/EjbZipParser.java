@@ -51,6 +51,9 @@ public class EjbZipParser {
     private static final Set<String> WEBMETHOD_ANNOTATIONS = Set.of(
             "WebMethod"
     );
+    private static final Set<String> SYNCHRONE_SERVICE_NAMES = Set.of(
+            "SynchroneService", "AsynchroneService", "ConnecteurService"
+    );
 
     private final JavaParser javaParser = new JavaParser();
     private final DtoClassParser dtoClassParser = new DtoClassParser();
@@ -193,10 +196,15 @@ public class EjbZipParser {
                 String source = java.nio.file.Files.readString(file, java.nio.charset.StandardCharsets.UTF_8);
                 com.github.javaparser.ParseResult<com.github.javaparser.ast.CompilationUnit> pr = javaParser.parse(source);
                 if (pr.isSuccessful() && pr.getResult().isPresent()) {
-                    for (var decl : pr.getResult().get().findAll(com.github.javaparser.ast.body.ClassOrInterfaceDeclaration.class)) {
+                    var cu = pr.getResult().get();
+                    for (var decl : cu.findAll(com.github.javaparser.ast.body.ClassOrInterfaceDeclaration.class)) {
                         if (!decl.isInterface()) {
                             fullClassBodies.put(decl.getNameAsString(), source);
                         }
+                    }
+                    // Also index enum declarations (e.g., Action enum for switch dispatch)
+                    for (var enumDecl : cu.findAll(com.github.javaparser.ast.body.EnumDeclaration.class)) {
+                        fullClassBodies.put(enumDecl.getNameAsString(), source);
                     }
                 }
             } catch (Exception e) {
@@ -219,7 +227,20 @@ public class EjbZipParser {
                         }
                     }
                     if (processBody != null) {
+                        log.debug("Processing EJB {} - processBody length: {}, classBody length: {}",
+                                ejb.getImplementationName(), processBody.length(),
+                                classBody != null ? classBody.length() : 0);
                         var functionCodes = functionCodeParser.parse(processBody, classBody);
+                        // Fallback 1: try external enum/switch pattern (fatourati, virement)
+                        if (functionCodes.isEmpty()) {
+                            log.debug("Trying parseWithExternalClasses for EJB {} - allClassBodies keys: {}",
+                                    ejb.getImplementationName(), fullClassBodies.keySet());
+                            functionCodes = functionCodeParser.parseWithExternalClasses(processBody, classBody, fullClassBodies);
+                        }
+                        // Fallback 2: try @UseCase class scanning (UCStrategie framework)
+                        if (functionCodes.isEmpty() && processBody.contains("super.process(")) {
+                            functionCodes = parseUseCaseClasses(javaFiles, fullClassBodies);
+                        }
                         ejb.setFunctionCodes(functionCodes);
                         log.info("EJB {} has {} function codes", ejb.getInterfaceName(), functionCodes.size());
                     }
@@ -338,6 +359,37 @@ public class EjbZipParser {
             ejb.setEjbType(ejbType);
             ejb.setImplementationName(decl.getNameAsString());
             if (jndiName != null) ejb.setJndiName(jndiName);
+        } else if (ifaceName != null && SYNCHRONE_SERVICE_NAMES.contains(ifaceName)) {
+            // Fallback: SynchroneService is an external framework interface (not defined in project)
+            // Create a synthetic EjbInfo with the process() method
+            String packageName = decl.findCompilationUnit()
+                    .flatMap(cu -> cu.getPackageDeclaration())
+                    .map(pd -> pd.getNameAsString())
+                    .orElse("");
+            EjbInfo ejb = new EjbInfo(ifaceName, packageName);
+            ejb.setEjbType(ejbType);
+            ejb.setImplementationName(decl.getNameAsString());
+            if (jndiName != null) ejb.setJndiName(jndiName);
+
+            // Add the process() method from the implementation
+            for (MethodDeclaration md : decl.getMethods()) {
+                if ("process".equals(md.getNameAsString())) {
+                    MethodInfo method = new MethodInfo(md.getNameAsString(), md.getType().asString());
+                    md.getParameters().forEach(p -> {
+                        method.addParameter(new ParameterInfo(p.getNameAsString(), p.getType().asString()));
+                    });
+                    md.getThrownExceptions().forEach(ex -> {
+                        method.getThrownExceptions().add(ex.asString());
+                    });
+                    md.getBody().ifPresent(body -> method.setMethodBody(body.toString()));
+                    ejb.addMethod(method);
+                }
+            }
+
+            if (!ejb.getMethods().isEmpty()) {
+                interfaceMap.put(ifaceName + "_" + decl.getNameAsString(), ejb);
+                log.info("Created synthetic EjbInfo for SynchroneService impl: {}", decl.getNameAsString());
+            }
         }
 
         // Extraire les corps de méthodes de l'implémentation
@@ -628,6 +680,154 @@ public class EjbZipParser {
                 zis.closeEntry();
             }
         }
+    }
+
+    /**
+     * Strategy 1: Parse @UseCase annotated classes (UCStrategie framework).
+     * Each UC class represents a function code. The class name (minus "UC" suffix) is the code.
+     * Dispatch path is always "flux/entete/fonction" for this framework.
+     */
+    private List<com.bank.tools.jaxrs.model.FunctionCodeInfo> parseUseCaseClasses(
+            List<Path> javaFiles, Map<String, String> fullClassBodies) {
+        List<com.bank.tools.jaxrs.model.FunctionCodeInfo> result = new ArrayList<>();
+
+        for (Path file : javaFiles) {
+            try {
+                String source = Files.readString(file, StandardCharsets.UTF_8);
+                if (!source.contains("@UseCase")) continue;
+
+                // Extract class name
+                java.util.regex.Pattern classNamePat = java.util.regex.Pattern.compile(
+                        "(?:public\\s+)?class\\s+(\\w+)");
+                java.util.regex.Matcher cnm = classNamePat.matcher(source);
+                if (!cnm.find()) continue;
+                String className = cnm.group(1);
+
+                // Derive function code from class name (strip "UC" suffix)
+                String code = className;
+                if (code.endsWith("UC")) {
+                    code = code.substring(0, code.length() - 2);
+                }
+
+                // Create FunctionCodeInfo
+                com.bank.tools.jaxrs.model.FunctionCodeInfo fci =
+                        new com.bank.tools.jaxrs.model.FunctionCodeInfo(code, code.toUpperCase());
+                fci.setDispatchPath("flux/entete/fonction");
+
+                // Try to extract input fields from the execute() method
+                // Look for cast pattern: (XxxVoIn) voIn or (XxxIn) voIn
+                java.util.regex.Pattern castPat = java.util.regex.Pattern.compile(
+                        "\\(\\s*(\\w+(?:VoIn|In))\\s*\\)\\s*(?:voIn|valueObject|vo)");
+                java.util.regex.Matcher castMatcher = castPat.matcher(source);
+                if (castMatcher.find()) {
+                    String inputClassName = castMatcher.group(1);
+                    List<String> inputFields = extractXmlElementFields(inputClassName, fullClassBodies);
+                    if (!inputFields.isEmpty()) {
+                        fci.setInputFields(inputFields);
+                    }
+                }
+
+                // Try to extract output fields from the output class
+                // Look for: new XxxVoOut() or XxxVoOut output
+                java.util.regex.Pattern outPat = java.util.regex.Pattern.compile(
+                        "new\\s+(\\w+(?:VoOut|Out))\\s*\\(");
+                java.util.regex.Matcher outMatcher = outPat.matcher(source);
+                if (outMatcher.find()) {
+                    String outputClassName = outMatcher.group(1);
+                    List<String> outputFields = extractOutputClassFields(outputClassName, fullClassBodies);
+                    if (!outputFields.isEmpty()) {
+                        fci.setOutputFields(outputFields);
+                    }
+                }
+
+                fci.setHttpMethod(fci.inferHttpMethod());
+                result.add(fci);
+                log.debug("Found @UseCase class: {} -> code: {}", className, code);
+
+            } catch (IOException e) {
+                log.debug("Error reading file {}: {}", file, e.getMessage());
+            }
+        }
+
+        log.info("Parsed {} @UseCase function codes", result.size());
+        return result;
+    }
+
+    /**
+     * Extract input field names from a ValueObject class using @XmlElement annotations.
+     * Falls back to getter-derived field names if no @XmlElement found.
+     */
+    private List<String> extractXmlElementFields(String className, Map<String, String> fullClassBodies) {
+        List<String> fields = new ArrayList<>();
+        String source = fullClassBodies.get(className);
+        if (source == null) return fields;
+
+        // Look for @XmlElement(name = "fieldName") annotations
+        java.util.regex.Pattern xmlElemPat = java.util.regex.Pattern.compile(
+                "@XmlElement\\s*\\(\\s*name\\s*=\\s*\"([^\"]+)\"\\s*\\)");
+        java.util.regex.Matcher m = xmlElemPat.matcher(source);
+        while (m.find()) {
+            String fieldName = m.group(1);
+            if (!fields.contains(fieldName)) {
+                fields.add(fieldName);
+            }
+        }
+
+        // Fallback: extract from setter names if no @XmlElement found
+        if (fields.isEmpty()) {
+            java.util.regex.Pattern setterPat = java.util.regex.Pattern.compile(
+                    "public\\s+void\\s+set(\\w+)\\s*\\(");
+            java.util.regex.Matcher sm = setterPat.matcher(source);
+            while (sm.find()) {
+                String name = sm.group(1);
+                // Convert PascalCase to camelCase
+                String fieldName = Character.toLowerCase(name.charAt(0)) + name.substring(1);
+                if (!fields.contains(fieldName) && !fieldName.equals("class")) {
+                    fields.add(fieldName);
+                }
+            }
+        }
+
+        return fields;
+    }
+
+    /**
+     * Extract output field names from a ValueObject output class.
+     * Uses getter names (excluding standard getClass()).
+     */
+    private List<String> extractOutputClassFields(String className, Map<String, String> fullClassBodies) {
+        List<String> fields = new ArrayList<>();
+        String source = fullClassBodies.get(className);
+        if (source == null) return fields;
+
+        // Extract from getter names
+        java.util.regex.Pattern getterPat = java.util.regex.Pattern.compile(
+                "public\\s+\\w+(?:<[^>]+>)?\\s+get(\\w+)\\s*\\(");
+        java.util.regex.Matcher m = getterPat.matcher(source);
+        while (m.find()) {
+            String name = m.group(1);
+            if (name.equals("Class")) continue; // skip getClass()
+            String fieldName = Character.toLowerCase(name.charAt(0)) + name.substring(1);
+            // Skip standard code/message fields (already handled by framework)
+            if (!fieldName.equals("codeRetour") && !fieldName.equals("messageRetour")
+                    && !fields.contains(fieldName)) {
+                fields.add(fieldName);
+            }
+        }
+
+        // Also check @XmlElement on output class
+        java.util.regex.Pattern xmlElemPat = java.util.regex.Pattern.compile(
+                "@XmlElement\\s*\\(\\s*name\\s*=\\s*\"([^\"]+)\"\\s*\\)");
+        java.util.regex.Matcher xm = xmlElemPat.matcher(source);
+        while (xm.find()) {
+            String fieldName = xm.group(1);
+            if (!fieldName.equals("codeRetour") && !fieldName.equals("messageRetour")
+                    && !fields.contains(fieldName)) {
+                fields.add(fieldName);
+            }
+        }
+
+        return fields;
     }
 
     private void deleteRecursive(Path dir) {
