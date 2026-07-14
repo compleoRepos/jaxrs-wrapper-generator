@@ -201,13 +201,22 @@ public class FunctionCodeParser {
     private Map<String, String> extractCodeToEnumMapping(String source) {
         Map<String, String> mapping = new LinkedHashMap<>();
 
+        // Determine if the class has an Action enum — if so, only accept cases that assign to it
+        boolean hasActionEnum = ENUM_PATTERN.matcher(source).find();
+
+        // Try to find the getAction() method body first (scoped extraction)
+        String searchScope = extractGetActionMethodBody(source);
+        if (searchScope == null) {
+            // Fallback: search the full source but be strict about enum assignment
+            searchScope = source;
+        }
+
         // Pattern: case "codeValue": ... action = Action.ENUM_VALUE; break;
-        // or: case "codeValue": action = Action.ENUM_VALUE; break;
         Pattern casePattern = Pattern.compile(
                 "case\\s+\"([^\"]+)\"\\s*:(.*?)(?=case\\s+\"|default\\s*:|\\})",
                 Pattern.DOTALL);
 
-        Matcher m = casePattern.matcher(source);
+        Matcher m = casePattern.matcher(searchScope);
         while (m.find()) {
             String codeValue = m.group(1);
             String caseBody = m.group(2);
@@ -217,13 +226,42 @@ public class FunctionCodeParser {
             Matcher em = enumAssign.matcher(caseBody);
             if (em.find()) {
                 mapping.put(codeValue, em.group(1));
-            } else {
-                // If no enum assignment, use the code itself as enum value
+            } else if (!hasActionEnum) {
+                // Only use the code itself as enum value when there is NO Action enum in the class.
+                // If an Action enum exists, cases without enum assignment are secondary switches
+                // (e.g., canal type "A"/"G"/"I"/"M") and should be ignored.
                 mapping.put(codeValue, codeValue.toUpperCase().replace("-", "_"));
             }
         }
 
         return mapping;
+    }
+
+    /**
+     * Extract the body of a getAction() or similar method that maps string codes to enum values.
+     * Returns null if no such method is found.
+     */
+    private String extractGetActionMethodBody(String source) {
+        // Look for methods like: Action getAction(String ...) { ... }
+        Pattern getActionPattern = Pattern.compile(
+                "(?:public|private|protected)?\\s*\\w+\\s+get\\w*[Aa]ction\\s*\\([^)]*\\)\\s*\\{",
+                Pattern.MULTILINE);
+        Matcher m = getActionPattern.matcher(source);
+        if (m.find()) {
+            int braceStart = m.end() - 1;
+            int depth = 1;
+            int i = braceStart + 1;
+            while (i < source.length() && depth > 0) {
+                char c = source.charAt(i);
+                if (c == '{') depth++;
+                else if (c == '}') depth--;
+                i++;
+            }
+            if (depth == 0) {
+                return source.substring(braceStart, i);
+            }
+        }
+        return null;
     }
 
     private Map<String, List<String>> extractFieldsByCase(String methodBody, Map<String, String> constants) {

@@ -211,7 +211,7 @@ public class JaxrsProjectGenerator {
         generateRunLocal(webModuleDir);
 
         // === README at project root ===
-        generateReadme(outputDir, ejbs);
+        generateReadme(outputDir, ejbs, useSourceEjb);
 
         log.info("Project generation complete: {}", outputDir);
     }
@@ -2284,7 +2284,7 @@ public class JaxrsProjectGenerator {
 
     // ===== README.md =====
 
-    private void generateReadme(Path outputDir, List<EjbInfo> ejbs) throws IOException {
+    private void generateReadme(Path outputDir, List<EjbInfo> ejbs, boolean useSourceEjb) throws IOException {
         StringBuilder sb = new StringBuilder();
         sb.append("# ").append(artifactId).append("\n\n");
         sb.append("Module WAR JAX-RS — Adaptateur REST pour les EJBs du projet legacy.\n\n");
@@ -2292,27 +2292,45 @@ public class JaxrsProjectGenerator {
         sb.append("Ce module est un **adaptateur pur** (pattern Adapter) qui expose les EJBs existants\n");
         sb.append("via des endpoints REST JSON. Il est déployé dans le même EAR que les EJBs sur WebSphere.\n\n");
         sb.append("```\n");
-        sb.append("Client HTTP ──> [Resource JAX-RS] ──> [Converter DTO↔Envelope] ──> [EJB via @EJB]\n");
+        if (useSourceEjb) {
+            sb.append("Client HTTP ──> [Resource JAX-RS] ──> [Converter DTO↔Envelope] ──> [EJB via JNDI]\n");
+        } else {
+            sb.append("Client HTTP ──> [Resource JAX-RS] ──> [Converter DTO↔Envelope] ──> [EJB via @EJB]\n");
+        }
         sb.append("```\n\n");
         sb.append("## EJBs exposés\n\n");
         sb.append("| EJB Interface | Resource | Endpoints |\n");
         sb.append("|---|---|---|\n");
         for (EjbInfo ejb : ejbs) {
             String resourceName = capitalize(ejb.deriveResourceName().replace("-", "")) + "Resource";
+            int endpointCount = (ejb.getFunctionCodes() != null && !ejb.getFunctionCodes().isEmpty())
+                    ? ejb.getFunctionCodes().size()
+                    : ejb.getMethods().size();
             sb.append("| ").append(ejb.getInterfaceName())
               .append(" | ").append(resourceName)
-              .append(" | ").append(ejb.getMethods().size())
+              .append(" | ").append(endpointCount)
               .append(" |\n");
         }
         sb.append("\n");
         sb.append("## Endpoints\n\n");
         for (EjbInfo ejb : ejbs) {
             sb.append("### /api/").append(ejb.deriveResourceName()).append("\n\n");
-            for (MethodInfo method : ejb.getMethods()) {
-                MethodInfo.HttpMethod httpMethod = method.getHttpMethod() != null ? method.getHttpMethod() : method.inferHttpMethod();
-                sb.append("- `").append(httpMethod.name()).append(" /api/")
-                  .append(ejb.deriveResourceName()).append("/")
-                  .append(camelToKebab(method.getName())).append("`\n");
+            if (ejb.getFunctionCodes() != null && !ejb.getFunctionCodes().isEmpty()) {
+                // V2: list function code endpoints
+                for (var fc : ejb.getFunctionCodes()) {
+                    String httpMethod = fc.getHttpMethod() != null ? fc.getHttpMethod().name() : "POST";
+                    sb.append("- `").append(httpMethod).append(" /api/")
+                      .append(ejb.deriveResourceName()).append("/")
+                      .append(fc.deriveEndpointName()).append("`\n");
+                }
+            } else {
+                // V1: list method-based endpoints
+                for (MethodInfo method : ejb.getMethods()) {
+                    MethodInfo.HttpMethod httpMethod = method.getHttpMethod() != null ? method.getHttpMethod() : method.inferHttpMethod();
+                    sb.append("- `").append(httpMethod.name()).append(" /api/")
+                      .append(ejb.deriveResourceName()).append("/")
+                      .append(camelToKebab(method.getName())).append("`\n");
+                }
             }
             sb.append("\n");
         }
@@ -2320,37 +2338,48 @@ public class JaxrsProjectGenerator {
         sb.append("```\n");
         sb.append(artifactId).append("/\n");
         sb.append("├── pom.xml                    (parent POM, packaging=pom)\n");
-        sb.append("├── ").append(artifactId).append("-ejb/          (module EJB, packaging=ejb)\n");
+        if (!useSourceEjb) {
+            sb.append("├── ").append(artifactId).append("-ejb/          (module EJB, packaging=ejb)\n");
+        }
         sb.append("├── ").append(artifactId).append("-ear/          (module EAR, packaging=ear)\n");
         sb.append("└── ").append(artifactId).append("-web/          (module WAR, packaging=war)\n");
         sb.append("```\n\n");
         sb.append("## Build\n\n");
         sb.append("```bash\n");
-        sb.append("# Compiler tout le projet (EJB + WAR + EAR)\n");
+        if (useSourceEjb) {
+            sb.append("# Compiler le projet (WAR + EAR)\n");
+        } else {
+            sb.append("# Compiler tout le projet (EJB + WAR + EAR)\n");
+        }
         sb.append("mvn clean package\n\n");
-        sb.append("# L'EAR g\u00e9n\u00e9r\u00e9 se trouve dans :\n");
+        sb.append("# L'EAR généré se trouve dans :\n");
         sb.append("# ").append(artifactId).append("-ear/target/").append(artifactId).append("-ear.ear\n");
         sb.append("```\n\n");
-        sb.append("## D\u00e9ploiement\n\n");
+        sb.append("## Déploiement\n\n");
         sb.append("### Via Docker\n\n");
         sb.append("```bash\n");
-        sb.append("cd ").append(artifactId).append("-web\n");
-        sb.append("docker build -t ").append(artifactId).append(" .\n");
+        sb.append("# Build context = racine du projet multi-modules\n");
+        sb.append("docker build -f ").append(artifactId).append("-web/Dockerfile -t ").append(artifactId).append(" .\n");
         sb.append("docker run -p 9080:9080 ").append(artifactId).append("\n");
         sb.append("```\n\n");
-        sb.append("### Via install_app (WebSphere)\n\n");
+        sb.append("### Via wsadmin (WebSphere Traditional)\n\n");
         sb.append("```bash\n");
-        sb.append("cd ").append(artifactId).append("-web\n");
-        sb.append("chmod +x install_app\n");
-        sb.append("./install_app\n");
+        sb.append("# Utiliser le script Jython install_app.py via wsadmin\n");
+        sb.append("/opt/IBM/WebSphere/AppServer/bin/wsadmin.sh -conntype NONE -lang jython -f ");
+        sb.append(artifactId).append("-web/install_app.py\n");
         sb.append("```\n\n");
-        sb.append("## Pr\u00e9requis\n\n");
+        sb.append("## Prérequis\n\n");
         sb.append("- Java 8+\n");
-        sb.append("- WebSphere Application Server 8.5.5+ / Liberty\n");
+        sb.append("- WebSphere Application Server 8.5.5+ (Traditional)\n");
         sb.append("- Les JARs `eai-commons-services` et `eai-midw-connectors` dans le classpath EAR\n\n");
         sb.append("## Configuration\n\n");
-        sb.append("Le lookup JNDI est configur\u00e9 via `@EJB(lookup = \"java:app/...\")`.\n");
-        sb.append("Adapter le lookup si le nom JNDI diff\u00e8re dans votre environnement.\n");
+        if (useSourceEjb) {
+            sb.append("Le lookup JNDI est effectué via `InitialContext` dans `@PostConstruct`.\n");
+            sb.append("Les noms JNDI sont configurés dans `ibm-ejb-jar-bnd.xml` du module EJB source.\n");
+        } else {
+            sb.append("Le lookup JNDI est configuré via `@EJB(lookup = \"java:app/...\")`.\n");
+            sb.append("Adapter le lookup si le nom JNDI diffère dans votre environnement.\n");
+        }
 
         Files.writeString(outputDir.resolve("README.md"), sb.toString());
     }
