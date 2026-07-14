@@ -106,15 +106,14 @@ class FullAuditTest {
         Path serviceDir = genDir.resolve(webModule + "/src/main/java/ma/eai/boa/xbanking/service");
         assertFalse(Files.exists(serviceDir), name + ": service/ ne doit PAS exister dans web");
 
-        // Vérifier contenu des Resources (pattern adaptateur WAR)
+        // Vérifier contenu des Resources (pattern POJO + lazy JNDI)
         for (Path resFile : Files.list(resourceDir).toList()) {
             String content = Files.readString(resFile);
-            assertFalse(content.contains("InitialContext"), name + "/" + resFile.getFileName() + ": JNDI interdit");
-            assertFalse(content.contains("lookupEjb"), name + "/" + resFile.getFileName() + ": lookupEjb interdit");
-            assertTrue(content.contains("@EJB"), name + "/" + resFile.getFileName() + ": @EJB manquant");
+            assertTrue(content.contains("InitialContext"), name + "/" + resFile.getFileName() + ": InitialContext manquant (lazy JNDI)");
+            assertFalse(content.contains("@EJB"), name + "/" + resFile.getFileName() + ": @EJB interdit (POJO mode)");
+            assertFalse(content.contains("@ApplicationScoped"), name + "/" + resFile.getFileName() + ": @ApplicationScoped interdit (POJO mode)");
             assertTrue(content.contains("SynchroneService"), name + "/" + resFile.getFileName() + ": SynchroneService manquant");
             assertTrue(content.contains("@Path("), name + "/" + resFile.getFileName() + ": @Path manquant");
-            assertTrue(content.contains("@ApplicationScoped"), name + "/" + resFile.getFileName() + ": @ApplicationScoped manquant");
             assertTrue(content.contains("@Produces(MediaType.APPLICATION_JSON)"), name + "/" + resFile.getFileName() + ": @Produces manquant");
             assertTrue(content.contains("CodeMapper.isSuccess"), name + "/" + resFile.getFileName() + ": CodeMapper manquant");
             assertTrue(content.contains("converter.toEnvelope"), name + "/" + resFile.getFileName() + ": converter.toEnvelope manquant");

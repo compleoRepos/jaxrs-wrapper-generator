@@ -88,11 +88,8 @@ public class FunctionCodeInfo {
      */
     public String deriveEndpointName() {
         if (code == null) return "unknown";
-        // Retirer le suffixe _TST pour les fonctions de test
+        // Conserver le code FONCTION complet (suffixe _TST inclus) pour garantir l'unicité
         String base = code;
-        if (isTestFunction && base.toUpperCase().endsWith("_TST")) {
-            base = base.substring(0, base.length() - 4);
-        }
         // CamelCase → kebab-case
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < base.length(); i++) {

@@ -105,7 +105,7 @@ class JaxrsProjectGeneratorTest {
         assertTrue(Files.exists(outputDir.resolve(WEB_MODULE + "/src/main/java/" + pkg + "/dto")));
         assertTrue(Files.exists(outputDir.resolve(WEB_MODULE + "/src/main/java/" + pkg + "/converter")));
         assertTrue(Files.exists(outputDir.resolve(WEB_MODULE + "/src/main/java/" + pkg + "/config")));
-        assertTrue(Files.exists(outputDir.resolve(WEB_MODULE + "/src/main/resources/META-INF/beans.xml")));
+        assertTrue(Files.exists(outputDir.resolve(WEB_MODULE + "/src/main/webapp/WEB-INF/web.xml")));
         // Deployment files
         assertTrue(Files.exists(outputDir.resolve(WEB_MODULE + "/Dockerfile")));
         assertTrue(Files.exists(outputDir.resolve(WEB_MODULE + "/install_app")));
@@ -141,14 +141,14 @@ class JaxrsProjectGeneratorTest {
     // ===== Tests Resource =====
 
     @Test
-    @DisplayName("Resource contient @EJB injection vers SynchroneService")
+    @DisplayName("Resource contient lazy JNDI lookup vers SynchroneService")
     void testResourceContainsEjbInjection() throws IOException {
         generator.generate(List.of(createTestEjb()), outputDir);
 
         String content = readFirstResource();
-        assertTrue(content.contains("@EJB"), "Resource doit contenir @EJB");
-        assertTrue(content.contains("SynchroneService ejbService"), "Resource doit injecter SynchroneService");
-        assertTrue(content.contains("ejbService.process("), "Resource doit appeler ejbService.process()");
+        assertTrue(content.contains("SynchroneService"), "Resource doit r\u00e9f\u00e9rencer SynchroneService");
+        assertTrue(content.contains("getEjbService().process("), "Resource doit appeler getEjbService().process()");
+        assertTrue(content.contains("InitialContext"), "Resource doit utiliser InitialContext pour JNDI");
     }
 
     @Test
@@ -157,7 +157,7 @@ class JaxrsProjectGeneratorTest {
         generator.generate(List.of(createTestEjb()), outputDir);
 
         String content = readFirstResource();
-        assertTrue(content.contains("import javax.ejb.EJB"), "Resource doit importer javax.ejb");
+        assertTrue(content.contains("import javax.naming.InitialContext"), "Resource doit importer javax.naming");
         assertTrue(content.contains("import javax.ws.rs"), "Resource doit importer javax.ws.rs");
         assertFalse(content.contains("jakarta"), "Resource ne doit PAS contenir jakarta");
     }
@@ -310,7 +310,7 @@ class JaxrsProjectGeneratorTest {
         assertTrue(Files.exists(outputDir.resolve("pom.xml")));
         assertTrue(Files.exists(outputDir.resolve(webMod + "/src/main/java/com/bank/api/config/JaxRsApplication.java")));
         assertTrue(Files.exists(outputDir.resolve(webMod + "/src/main/java/com/bank/api/config/CodeMapper.java")));
-        assertTrue(Files.exists(outputDir.resolve(webMod + "/src/main/resources/META-INF/beans.xml")));
+        assertTrue(Files.exists(outputDir.resolve(webMod + "/src/main/webapp/WEB-INF/web.xml")));
 
         Path resourceDir = outputDir.resolve(webMod + "/src/main/java/com/bank/api/resource");
         Path converterDir = outputDir.resolve(webMod + "/src/main/java/com/bank/api/converter");
@@ -394,7 +394,7 @@ class JaxrsProjectGeneratorTest {
 
         String content = readFirstResource();
         assertTrue(content.contains("InitialContext"), "V2 Resource doit utiliser InitialContext");
-        assertTrue(content.contains("@PostConstruct"), "V2 Resource doit avoir @PostConstruct");
+        assertTrue(content.contains("getEjbService()"), "V2 Resource doit avoir lazy JNDI getter");
         assertTrue(content.contains("ejb/CommandChequierService"), "V2 Resource doit utiliser le JNDI name réel");
         assertFalse(content.contains("@EJB"), "V2 Resource ne doit PAS utiliser @EJB");
     }
